@@ -1387,6 +1387,10 @@ memtx_set_tuple_format_vtab(const char *allocator_name)
 		memtx_alloc_init<SmallAlloc>();
 		create_memtx_tuple_format_vtab<SmallAlloc>
 			(&memtx_tuple_format_vtab);
+	} else if (strncmp(allocator_name, "linear", strlen("linear")) == 0) {
+		memtx_alloc_init<LinearAlloc>();
+		create_memtx_tuple_format_vtab<LinearAlloc>
+			(&memtx_tuple_format_vtab);
 	} else if (strncmp(allocator_name, "system", strlen("system")) == 0) {
 		memtx_alloc_init<SysAlloc>();
 		create_memtx_tuple_format_vtab<SysAlloc>

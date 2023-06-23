@@ -250,6 +250,7 @@ set(box_sources
     lua/merger.c
     lua/watcher.c
     lua/iproto.c
+    lua/benchmark.cc
     ${bin_sources})
 
 if(ENABLE_AUDIT_LOG)
@@ -326,7 +327,12 @@ add_custom_command(OUTPUT ${SQL_BIN_DIR}/opcodes.c
     DEPENDS ${SQL_SRC_DIR}/vdbe.c ${EXT_SRC_DIR}/mkopcodec.sh ${SQL_BIN_DIR}/parse.h
         ${SQL_BIN_DIR}/opcodes.h)
 
+find_package(benchmark REQUIRED)
+if (NOT ${benchmark_FOUND})
+    message(FATAL_ERROR "Google Benchmark library was not found")
+endif()
+
 target_link_libraries(box box_error tuple stat xrow xlog vclock crc32 raft
-                      node_name ${common_libraries})
+                      node_name ${common_libraries} benchmark::benchmark)
 
 add_dependencies(box build_bundled_libs generate_sql_files)

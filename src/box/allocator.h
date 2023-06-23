@@ -29,6 +29,8 @@
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
+#include <stdio.h>
+#include <stdlib.h>
 #include <tuple>
 
 #include <small/small.h>
@@ -170,7 +172,56 @@ private:
 	static struct sys_alloc sys_alloc;
 };
 
-using allocators = std::tuple<SmallAlloc, SysAlloc>;
+class LinearAlloc
+{
+public:
+	static inline void
+	create(struct allocator_settings *settings)
+	{
+		(void) settings;
+		space_size = 1024 * 1024 * 1024;
+		space = (char *)calloc(space_size, 1);
+		space_end = space + space_size;
+		next_ptr = space;
+	}
+	static inline void
+	destroy(void)
+	{
+		::free((void *)space);
+	}
+	static inline void *
+	alloc(size_t size)
+	{
+		void *result = (void *)next_ptr;
+		next_ptr += size;
+		if (next_ptr > space + space_size) {
+			printf("Linear allocator overrun!\n");
+			exit(-1);
+		}
+		return result;
+	}
+	static inline void
+	free(void *ptr, size_t size)
+	{
+		(void) ptr;
+		(void) size;
+	}
+	static inline void
+	stats(struct allocator_stats *alloc_stats, allocator_stats_cb cb,
+	      void *cb_ctx)
+	{
+		(void) cb;
+		(void) cb_ctx;
+		alloc_stats->sys.used = (ptrdiff_t)(next_ptr - space);
+	}
+private:
+	static char *space;
+	static char *space_end;
+	static size_t space_size;
+	static char *next_ptr;
+};
+
+using allocators = std::tuple<SmallAlloc, SysAlloc, LinearAlloc>;
 
 template <class F, class... ARGS>
 static void

@@ -1542,9 +1542,9 @@ static int
 box_check_allocator(void)
 {
 	const char *allocator = cfg_gets("memtx_allocator");
-	if (strcmp(allocator, "small") && strcmp(allocator, "system")) {
+	if (strcmp(allocator, "small") && strcmp(allocator, "system") && strcmp(allocator, "linear")) {
 		diag_set(ClientError, ER_CFG, "memtx_allocator",
-			 tt_sprintf("must be small or system, "
+			 tt_sprintf("must be small, system or linear, "
 				    "but was set to %s", allocator));
 		return -1;
 	}
