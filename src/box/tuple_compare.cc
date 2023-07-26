@@ -572,6 +572,64 @@ tuple_compare_field_with_type(const char *field_a, enum mp_type a_type,
 	}
 }
 
+/*
+ * Implements the field comparison logic. If the key we use is not nullable
+ * then a simple call to tuple_compare_field is used.
+ *
+ * Otherwise one of \p field_a and \p field_b can be NIL: either it's encoded
+ * as MP_NIL or if the field is absent (corresponding field pointer equals to
+ * NULL). In this case we perform comparison so that NIL is lesser than any
+ * value but two NILs are equal.
+ *
+ * The template parameters a_is_optional and b_is_optional specify if the
+ * corresponding field arguments can be absent (equal to NULL).
+ *
+ * If \p was_null_met is not NULL, sets the boolean pointed by it to true if
+ * any of \p field_a and \p field_b is absent or NIL. Othervice the pointed
+ * value is not modified.
+ *
+ * @param part the key part we compare
+ * @param field_a the field to compare
+ * @param field_b the field to compare against
+ * @param was_null_met pointer to the value to set to true if a NIL is met,
+ *                     can be set to NULL if the information isn't required
+ * @retval 0  if field_a == field_b
+ * @retval <0 if field_a < field_b
+ * @retval >0 if field_a > field_b
+ *
+ * FIXME: The second line of template parameters is classified by the
+ *        checkpatch as a statement, so it's required to be aligned to
+ *        the tab stop. See the tarantool/checkpatch#66.
+ */
+template<bool is_nullable, bool a_is_optional, bool b_is_optional>
+static int
+key_part_compare_fields(struct key_part *part, const char *field_a,
+			const char *field_b, bool *was_null_met = NULL)
+{
+	int rc;
+	if (!is_nullable) {
+		rc = tuple_compare_field(field_a, field_b,
+					 part->type, part->coll);
+		return rc;
+	}
+	enum mp_type a_type = (a_is_optional && field_a == NULL) ?
+			      MP_NIL : mp_typeof(*field_a);
+	enum mp_type b_type = (b_is_optional && field_b == NULL) ?
+			      MP_NIL : mp_typeof(*field_b);
+	bool a_is_value = a_type != MP_NIL;
+	bool b_is_value = b_type != MP_NIL;
+	if (!a_is_value || !b_is_value) {
+		if (was_null_met != NULL)
+			*was_null_met = true;
+		rc = a_is_value - b_is_value;
+	} else {
+		rc = tuple_compare_field_with_type(field_a, a_type,
+						   field_b, b_type,
+						   part->type, part->coll);
+	}
+	return rc;
+}
+
 template<bool is_nullable, bool has_optional_parts, bool has_json_paths,
 	 bool is_multikey>
 static inline int
@@ -601,19 +659,8 @@ tuple_compare_slowpath(struct tuple *tuple_a, hint_t tuple_a_hint,
 		assert(!has_optional_parts);
 		mp_decode_array(&tuple_a_raw);
 		mp_decode_array(&tuple_b_raw);
-		if (! is_nullable) {
-			return tuple_compare_field(tuple_a_raw, tuple_b_raw,
-						   part->type, part->coll);
-		}
-		enum mp_type a_type = mp_typeof(*tuple_a_raw);
-		enum mp_type b_type = mp_typeof(*tuple_b_raw);
-		if (a_type == MP_NIL)
-			return b_type == MP_NIL ? 0 : -1;
-		else if (b_type == MP_NIL)
-			return 1;
-		return tuple_compare_field_with_type(tuple_a_raw,  a_type,
-						     tuple_b_raw, b_type,
-						     part->type, part->coll);
+		return key_part_compare_fields<is_nullable, false, false>(
+			part, tuple_a_raw, tuple_b_raw);
 	}
 
 	bool was_null_met = false;
@@ -623,7 +670,6 @@ tuple_compare_slowpath(struct tuple *tuple_a, hint_t tuple_a_hint,
 	const uint32_t *field_map_b = tuple_field_map(tuple_b);
 	struct key_part *end;
 	const char *field_a, *field_b;
-	enum mp_type a_type, b_type;
 	if (is_nullable)
 		end = part + key_def->unique_part_count;
 	else
@@ -652,35 +698,11 @@ tuple_compare_slowpath(struct tuple *tuple_a, hint_t tuple_a_hint,
 		}
 		assert(has_optional_parts ||
 		       (field_a != NULL && field_b != NULL));
-		if (! is_nullable) {
-			rc = tuple_compare_field(field_a, field_b, part->type,
-						 part->coll);
-			if (rc != 0)
-				return rc;
-			else
-				continue;
-		}
-		if (has_optional_parts) {
-			a_type = field_a != NULL ? mp_typeof(*field_a) : MP_NIL;
-			b_type = field_b != NULL ? mp_typeof(*field_b) : MP_NIL;
-		} else {
-			a_type = mp_typeof(*field_a);
-			b_type = mp_typeof(*field_b);
-		}
-		if (a_type == MP_NIL) {
-			if (b_type != MP_NIL)
-				return -1;
-			was_null_met = true;
-		} else if (b_type == MP_NIL) {
-			return 1;
-		} else {
-			rc = tuple_compare_field_with_type(field_a, a_type,
-							   field_b, b_type,
-							   part->type,
-							   part->coll);
-			if (rc != 0)
-				return rc;
-		}
+		rc = key_part_compare_fields<is_nullable, has_optional_parts,
+					     has_optional_parts>(
+			part, field_a, field_b, &was_null_met);
+		if (rc != 0)
+			return rc;
 	}
 	/*
 	 * Do not use full parts set when no NULLs. It allows to
@@ -721,8 +743,8 @@ tuple_compare_slowpath(struct tuple *tuple_a, hint_t tuple_a_hint,
 		 * be absent or be NULLs.
 		 */
 		assert(field_a != NULL && field_b != NULL);
-		rc = tuple_compare_field(field_a, field_b, part->type,
-					 part->coll);
+		rc = key_part_compare_fields<false, false, false>(
+			part, field_a, field_b);
 		if (rc != 0)
 			return rc;
 	}
@@ -752,7 +774,6 @@ tuple_compare_with_key_slowpath(struct tuple *tuple, hint_t tuple_hint,
 	struct tuple_format *format = tuple_format(tuple);
 	const char *tuple_raw = tuple_data(tuple);
 	const uint32_t *field_map = tuple_field_map(tuple);
-	enum mp_type a_type, b_type;
 	if (likely(part_count == 1)) {
 		const char *field;
 		if (is_multikey) {
@@ -767,24 +788,8 @@ tuple_compare_with_key_slowpath(struct tuple *tuple, hint_t tuple_hint,
 			field = tuple_field_raw(format, tuple_raw, field_map,
 						part->fieldno);
 		}
-		if (! is_nullable) {
-			return tuple_compare_field(field, key, part->type,
-						   part->coll);
-		}
-		if (has_optional_parts)
-			a_type = field != NULL ? mp_typeof(*field) : MP_NIL;
-		else
-			a_type = mp_typeof(*field);
-		b_type = mp_typeof(*key);
-		if (a_type == MP_NIL) {
-			return b_type == MP_NIL ? 0 : -1;
-		} else if (b_type == MP_NIL) {
-			return 1;
-		} else {
-			return tuple_compare_field_with_type(field, a_type, key,
-							     b_type, part->type,
-							     part->coll);
-		}
+		return key_part_compare_fields<is_nullable, has_optional_parts,
+					       false>(part, field, key);
 	}
 
 	struct key_part *end = part + part_count;
@@ -802,31 +807,10 @@ tuple_compare_with_key_slowpath(struct tuple *tuple, hint_t tuple_hint,
 			field = tuple_field_raw(format, tuple_raw, field_map,
 						part->fieldno);
 		}
-		if (! is_nullable) {
-			rc = tuple_compare_field(field, key, part->type,
-						 part->coll);
-			if (rc != 0)
-				return rc;
-			else
-				continue;
-		}
-		if (has_optional_parts)
-			a_type = field != NULL ? mp_typeof(*field) : MP_NIL;
-		else
-			a_type = mp_typeof(*field);
-		b_type = mp_typeof(*key);
-		if (a_type == MP_NIL) {
-			if (b_type != MP_NIL)
-				return -1;
-		} else if (b_type == MP_NIL) {
-			return 1;
-		} else {
-			rc = tuple_compare_field_with_type(field, a_type, key,
-							   b_type, part->type,
-							   part->coll);
-			if (rc != 0)
-				return rc;
-		}
+		rc = key_part_compare_fields<is_nullable, has_optional_parts,
+					     false>(part, field, key);
+		if (rc != 0)
+			return rc;
 	}
 	return 0;
 }
@@ -852,23 +836,8 @@ key_compare_and_skip_parts(const char **key_a, const char **key_b,
 	*was_null_met = false;
 
 	if (likely(part_count == 1)) {
-		enum mp_type a_type = mp_typeof(**key_a);
-		enum mp_type b_type = mp_typeof(**key_b);
-		if (! is_nullable) {
-			rc = tuple_compare_field(*key_a, *key_b, part->type,
-						 part->coll);
-		} else if (a_type == MP_NIL) {
-			rc = b_type == MP_NIL ? 0 : -1;
-			*was_null_met = true;
-		} else if (b_type == MP_NIL) {
-			rc = 1;
-			*was_null_met = true;
-		} else {
-			rc = tuple_compare_field_with_type(*key_a, a_type,
-							   *key_b, b_type,
-							   part->type,
-							   part->coll);
-		}
+		rc = key_part_compare_fields<is_nullable, false, false>(
+			part, *key_a, *key_b, was_null_met);
 		/* If key parts are equals, we must skip them. */
 		if (rc == 0) {
 			mp_next(key_a);
@@ -879,31 +848,10 @@ key_compare_and_skip_parts(const char **key_a, const char **key_b,
 
 	struct key_part *end = part + part_count;
 	for (; part < end; ++part, mp_next(key_a), mp_next(key_b)) {
-		if (! is_nullable) {
-			rc = tuple_compare_field(*key_a, *key_b, part->type,
-						 part->coll);
-			if (rc != 0)
-				return rc;
-			else
-				continue;
-		}
-		enum mp_type a_type = mp_typeof(**key_a);
-		enum mp_type b_type = mp_typeof(**key_b);
-		if (a_type == MP_NIL) {
-			*was_null_met = true;
-			if (b_type != MP_NIL)
-				return -1;
-		} else if (b_type == MP_NIL) {
-			*was_null_met = true;
-			return 1;
-		} else {
-			rc = tuple_compare_field_with_type(*key_a, a_type,
-							   *key_b, b_type,
-							   part->type,
-							   part->coll);
-			if (rc != 0)
-				return rc;
-		}
+		rc = key_part_compare_fields<is_nullable, false, false>(
+			part, *key_a, *key_b, was_null_met);
+		if (rc != 0)
+			return rc;
 	}
 	return 0;
 }
@@ -953,8 +901,10 @@ tuple_compare_with_key_sequential(struct tuple *tuple, hint_t tuple_hint,
 	if (field_count < part_count) {
 		for (uint32_t i = field_count; i < part_count;
 		     ++i, mp_next(&key)) {
-			if (mp_typeof(*key) != MP_NIL)
-				return -1;
+			rc = key_part_compare_fields<true, true, false>(
+				&key_def->parts[i], NULL, key);
+			if (rc != 0)
+				return rc;
 		}
 	}
 	return 0;
@@ -1011,28 +961,14 @@ tuple_compare_sequential(struct tuple *tuple_a, hint_t tuple_a_hint,
 	struct key_part *part = key_def->parts;
 	struct key_part *end = part + key_def->unique_part_count;
 	uint32_t i = 0;
-	for (; part < end; ++part, ++i) {
-		enum mp_type a_type, b_type;
-		if (has_optional_parts) {
-			a_type = i >= fc_a ? MP_NIL : mp_typeof(*key_a);
-			b_type = i >= fc_b ? MP_NIL : mp_typeof(*key_b);
-		} else {
-			a_type = mp_typeof(*key_a);
-			b_type = mp_typeof(*key_b);
-		}
-		if (a_type == MP_NIL) {
-			if (b_type != MP_NIL)
-				return -1;
-			was_null_met = true;
-		} else if (b_type == MP_NIL) {
-			return 1;
-		} else {
-			rc = tuple_compare_field_with_type(key_a, a_type, key_b,
-							   b_type, part->type,
-							   part->coll);
-			if (rc != 0)
-				return rc;
-		}
+	for (const char *field_a, *field_b; part < end; ++part, ++i) {
+		field_a = (has_optional_parts && i >= fc_a) ? NULL : key_a;
+		field_b = (has_optional_parts && i >= fc_b) ? NULL : key_b;
+		rc = key_part_compare_fields<true, has_optional_parts,
+					     has_optional_parts>(
+			part, field_a, field_b, &was_null_met);
+		if (rc != 0)
+			return rc;
 		if (!has_optional_parts || i < fc_a)
 			mp_next(&key_a);
 		if (!has_optional_parts || i < fc_b)
@@ -1048,8 +984,8 @@ tuple_compare_sequential(struct tuple *tuple_a, hint_t tuple_a_hint,
 		 * not be absent or be null.
 		 */
 		assert(i < fc_a && i < fc_b);
-		rc = tuple_compare_field(key_a, key_b, part->type,
-					 part->coll);
+		rc = key_part_compare_fields<false, false, false>(
+			part, key_a, key_b);
 		if (rc != 0)
 			return rc;
 	}
@@ -1424,6 +1360,8 @@ static const comparator_with_key_signature cmp_wk_arr[] = {
 	KEY_COMPARATOR(1, FIELD_TYPE_STRING  , 2, FIELD_TYPE_STRING)
 };
 
+#undef KEY_COMPARATOR
+
 /**
  * A functional index tuple compare.
  * tuple_a_hint and tuple_b_hint are expected to be valid pointers to functional
@@ -1492,12 +1430,10 @@ func_index_compare(struct tuple *tuple_a, hint_t tuple_a_hint,
 						  field_map_b, part,
 						  MULTIKEY_NONE);
 		assert(field_a != NULL && field_b != NULL);
-		rc = tuple_compare_field(field_a, field_b, part->type,
-					 part->coll);
+		rc = key_part_compare_fields<false, false, false>(
+			part, field_a, field_b);
 		if (rc != 0)
 			return rc;
-		else
-			continue;
 	}
 	return 0;
 }
@@ -1551,15 +1487,14 @@ func_index_compare_with_key(struct tuple *tuple, hint_t tuple_hint,
 		field = tuple_field_raw_by_part(format, tuple_raw, field_map,
 						part, MULTIKEY_NONE);
 		assert(field != NULL);
-		rc = tuple_compare_field(field, key, part->type, part->coll);
+		rc = key_part_compare_fields<false, false, false>(
+			part, field, key);
 		mp_next(&key);
 		if (rc != 0)
 			return rc;
 	}
 	return 0;
 }
-
-#undef KEY_COMPARATOR
 
 /* }}} tuple_compare_with_key */
 
