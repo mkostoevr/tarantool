@@ -1,3 +1,5 @@
+#include <vector>
+
 #include <stdarg.h>
 #include <stddef.h>
 #include <string.h>
@@ -9,6 +11,7 @@
 #include "small/region.h"
 #include "trivia/util.h"
 #include "tuple.h"
+#include "tt_static.h"
 
 #define UNIT_TAP_COMPATIBLE 1
 #include "unit.h"
@@ -457,16 +460,1307 @@ test_tuple_validate_key_parts_raw(void)
 	check_plan();
 }
 
+static void
+test_key_compare_result(const char *key_a, const char *key_b,
+			struct key_def *key_def, int expected,
+			const char *funcname)
+{
+	const char *key_a_full = key_a;
+	const char *key_b_full = key_b;
+	size_t key_a_len = mp_decode_array(&key_a);
+	size_t key_b_len = mp_decode_array(&key_b);
+	size_t key_part_count = key_def->part_count;
+	assert(key_a_len == key_b_len);
+	assert(key_a_len == key_part_count);
+	int rc = key_compare(key_a, key_part_count, HINT_NONE,
+			     key_b, key_part_count, HINT_NONE,
+			     key_def);
+	ok(rc == expected, "%s(%s, %s) = %d, expected %d.", funcname,
+	   mp_str(key_a_full), mp_str(key_b_full), rc, expected);
+}
+
+static void
+test_key_compare_singlepart(bool is_nullable)
+{
+	size_t p = 4 + (is_nullable ? 4 : 0);
+	plan(p);
+	header();
+
+	/* Type is number to prevent from using precompiled comparators. */
+	struct key_def *key_def = test_key_def_new(
+		"[{%s%u%s%s%s%b}]",
+		"field", 0, "type", "number", "is_nullable", is_nullable);
+
+	const char *funcname = (const char *)xstrdup(tt_sprintf(
+		"key_compare<%s, key_def.part_count = 1>",
+		is_nullable ? "true" : "false"));
+
+	std::vector<char *> keys_eq = {
+		/* Regular case. */
+		test_key_new("[%u]", 0),
+		test_key_new("[%u]", 0),
+	};
+
+	if (is_nullable) {
+		/* NILs. */
+		keys_eq.push_back(test_key_new("[NIL]"));
+		keys_eq.push_back(test_key_new("[NIL]"));
+	}
+
+	std::vector<char *> keys_gt = {
+		/* regular cases. */
+		test_key_new("[%u]", 1),
+		test_key_new("[%u]", 0),
+	};
+
+	if (is_nullable) {
+		/* NILs. */
+		keys_gt.push_back(test_key_new("[%u]", 0));
+		keys_gt.push_back(test_key_new("[NIL]"));
+	}
+
+	assert(keys_eq.size() % 2 == 0);
+	for (size_t i = 0; i < keys_eq.size(); i += 2) {
+		char *a = keys_eq[i];
+		char *b = keys_eq[i + 1];
+		test_key_compare_result(a, b, key_def, 0, funcname);
+		test_key_compare_result(b, a, key_def, 0, funcname);
+	}
+
+	assert(keys_gt.size() % 2 == 0);
+	for (size_t i = 0; i < keys_gt.size(); i += 2) {
+		char *a = keys_gt[i];
+		char *b = keys_gt[i + 1];
+		test_key_compare_result(a, b, key_def, 1, funcname);
+		test_key_compare_result(b, a, key_def, -1, funcname);
+	}
+
+	for (size_t i = 0; i < keys_eq.size(); i++) {
+		free(keys_eq[i]);
+	}
+
+	for (size_t i = 0; i < keys_gt.size(); i++) {
+		free(keys_gt[i]);
+	}
+
+	key_def_delete(key_def);
+
+	free((void *)funcname);
+
+	footer();
+	check_plan();
+}
+
+static void
+test_key_compare(bool is_nullable)
+{
+	size_t p = 18 + (is_nullable ? 40 : 0);
+	plan(p);
+	header();
+
+	struct key_def *key_def = test_key_def_new(
+		"[{%s%u%s%s%s%b}{%s%u%s%s%s%b}{%s%u%s%s%s%b}]",
+		"field", 0, "type", "number", "is_nullable", is_nullable,
+		"field", 1, "type", "number", "is_nullable", is_nullable,
+		"field", 2, "type", "number", "is_nullable", is_nullable);
+
+	const char *funcname = (const char *)xstrdup(tt_sprintf(
+		"key_compare<%s>", is_nullable ? "true" : "false"));
+
+	std::vector<char *> keys_eq = {
+		/* Regular case. */
+		test_key_new("[%u%u%u]", 0, 0, 0),
+		test_key_new("[%u%u%u]", 0, 0, 0),
+	};
+
+	if (is_nullable) {
+		/* NILs. */
+		keys_eq.push_back(test_key_new("[%u%uNIL]", 0, 0));
+		keys_eq.push_back(test_key_new("[%u%uNIL]", 0, 0));
+
+		keys_eq.push_back(test_key_new("[%uNIL%u]", 0, 0));
+		keys_eq.push_back(test_key_new("[%uNIL%u]", 0, 0));
+
+		keys_eq.push_back(test_key_new("[NIL%u%u]", 0, 0));
+		keys_eq.push_back(test_key_new("[NIL%u%u]", 0, 0));
+
+		keys_eq.push_back(test_key_new("[%uNILNIL]", 0));
+		keys_eq.push_back(test_key_new("[%uNILNIL]", 0));
+
+		keys_eq.push_back(test_key_new("[NIL%uNIL]", 0));
+		keys_eq.push_back(test_key_new("[NIL%uNIL]", 0));
+
+		keys_eq.push_back(test_key_new("[NILNIL%u]", 0));
+		keys_eq.push_back(test_key_new("[NILNIL%u]", 0));
+
+		keys_eq.push_back(test_key_new("[NILNILNIL]"));
+		keys_eq.push_back(test_key_new("[NILNILNIL]"));
+	}
+
+	std::vector<char *> keys_gt = {
+		/* regular cases. */
+		test_key_new("[%u%u%u]", 0, 0, 1),
+		test_key_new("[%u%u%u]", 0, 0, 0),
+
+		test_key_new("[%u%u%u]", 0, 1, 0),
+		test_key_new("[%u%u%u]", 0, 0, 0),
+
+		test_key_new("[%u%u%u]", 0, 1, 0),
+		test_key_new("[%u%u%u]", 0, 0, 1),
+
+		test_key_new("[%u%u%u]", 0, 1, 1),
+		test_key_new("[%u%u%u]", 0, 0, 1),
+
+		test_key_new("[%u%u%u]", 1, 0, 0),
+		test_key_new("[%u%u%u]", 0, 0, 0),
+
+		test_key_new("[%u%u%u]", 1, 0, 0),
+		test_key_new("[%u%u%u]", 0, 0, 1),
+
+		test_key_new("[%u%u%u]", 1, 0, 0),
+		test_key_new("[%u%u%u]", 0, 1, 1),
+
+		test_key_new("[%u%u%u]", 1, 1, 1),
+		test_key_new("[%u%u%u]", 0, 1, 1),
+	};
+
+	if (is_nullable) {
+		/* NILs. */
+		keys_gt.push_back(test_key_new("[%u%u%u]", 0, 0, 0));
+		keys_gt.push_back(test_key_new("[%u%uNIL]", 0, 0));
+
+		keys_gt.push_back(test_key_new("[%u%u%u]", 0, 0, 0));
+		keys_gt.push_back(test_key_new("[%uNILNIL]", 0));
+
+		keys_gt.push_back(test_key_new("[%u%u%u]", 0, 0, 0));
+		keys_gt.push_back(test_key_new("[NILNILNIL]"));
+
+		keys_gt.push_back(test_key_new("[%u%uNIL]", 0, 0));
+		keys_gt.push_back(test_key_new("[%uNILNIL]", 0));
+
+		keys_gt.push_back(test_key_new("[%u%uNIL]", 0, 0));
+		keys_gt.push_back(test_key_new("[NILNILNIL]"));
+
+		keys_gt.push_back(test_key_new("[%uNILNIL]", 0));
+		keys_gt.push_back(test_key_new("[NILNILNIL]"));
+
+		keys_gt.push_back(test_key_new("[%u%uNIL]", 0, 1));
+		keys_gt.push_back(test_key_new("[%u%u%u]", 0, 0, 0));
+
+		keys_gt.push_back(test_key_new("[%uNILNIL]", 1));
+		keys_gt.push_back(test_key_new("[%u%u%u]", 0, 0, 0));
+
+		keys_gt.push_back(test_key_new("[%uNILNIL]", 1));
+		keys_gt.push_back(test_key_new("[%u%u%u]", 0, 1, 1));
+
+		keys_gt.push_back(test_key_new("[%u%u%u]", 0, 0, 0));
+		keys_gt.push_back(test_key_new("[%uNIL%u]", 0, 1));
+
+		keys_gt.push_back(test_key_new("[%u%u%u]", 0, 0, 0));
+		keys_gt.push_back(test_key_new("[NILNIL%u]", 1));
+
+		keys_gt.push_back(test_key_new("[%u%u%u]", 0, 0, 0));
+		keys_gt.push_back(test_key_new("[NIL%u%u]", 1, 1));
+
+		keys_gt.push_back(test_key_new("[%uNILNIL]", 1));
+		keys_gt.push_back(test_key_new("[%u%uNIL]", 0, 0));
+	}
+
+	assert(keys_eq.size() % 2 == 0);
+	for (size_t i = 0; i < keys_eq.size(); i += 2) {
+		char *a = keys_eq[i];
+		char *b = keys_eq[i + 1];
+		test_key_compare_result(a, b, key_def, 0, funcname);
+		test_key_compare_result(b, a, key_def, 0, funcname);
+	}
+
+	assert(keys_gt.size() % 2 == 0);
+	for (size_t i = 0; i < keys_gt.size(); i += 2) {
+		char *a = keys_gt[i];
+		char *b = keys_gt[i + 1];
+		test_key_compare_result(a, b, key_def, 1, funcname);
+		test_key_compare_result(b, a, key_def, -1, funcname);
+	}
+
+	for (size_t i = 0; i < keys_eq.size(); i++) {
+		free(keys_eq[i]);
+	}
+
+	for (size_t i = 0; i < keys_gt.size(); i++) {
+		free(keys_gt[i]);
+	}
+
+	key_def_delete(key_def);
+
+	free((void *)funcname);
+
+	footer();
+	check_plan();
+}
+
+static void
+test_tuple_compare_with_key(struct tuple *tuple_a, struct tuple *tuple_b,
+			    struct key_def *key_def, int expected,
+			    const char *funcname)
+{
+	size_t region_svp = region_used(&fiber()->gc);
+	const char *key = tuple_extract_key(tuple_b, key_def,
+					    MULTIKEY_NONE, NULL);
+	mp_decode_array(&key);
+	int rc = tuple_compare_with_key(tuple_a, HINT_NONE, key,
+					key_def->part_count,
+					HINT_NONE, key_def);
+	ok(rc == expected, "%s(%s, %s) = %d, expected %d.", funcname,
+	   tuple_str(tuple_a), tuple_str(tuple_b), rc, expected);
+	region_truncate(&fiber()->gc, region_svp);
+}
+
+static void
+test_tuple_compare_with_key_slowpath_singlepart(
+	bool is_nullable_and_has_optional_parts)
+{
+	size_t p = 8 + (is_nullable_and_has_optional_parts ? 10 : 0);
+	plan(p);
+	header();
+
+	/* Type is number to prevent from using precompiled comparators. */
+	struct key_def *key_def = test_key_def_new(
+		"[{%s%u%s%s%s%b}]", "field", 1, "type", "number",
+		"is_nullable", is_nullable_and_has_optional_parts);
+
+	/* Update has_optional_parts if the last parts can't be nil. */
+	size_t min_field_count = tuple_format_min_field_count(&key_def, 1,
+							      NULL, 0);
+	key_def_update_optionality(key_def, min_field_count);
+
+	const char *funcname = (const char *)xstrdup(tt_sprintf(
+		"tuple_compare_with_key_slowpath<%s, key_def.part_count = 1>",
+		is_nullable_and_has_optional_parts ?
+		"true, true" : "false, false"));
+
+	std::vector<struct tuple *> tuples_eq = {
+		/* Regular case. */
+		test_tuple_new("[%u%u]", 0, 0),
+		test_tuple_new("[%u%u]", 0, 0),
+
+		/* The first field is not indexed. */
+		test_tuple_new("[%u%u]", 1, 0),
+		test_tuple_new("[%u%u]", 0, 0),
+	};
+
+	if (is_nullable_and_has_optional_parts) {
+		/* NILs and unexisting parts. */
+		tuples_eq.push_back(test_tuple_new("[%uNIL]", 0));
+		tuples_eq.push_back(test_tuple_new("[%uNIL]", 0));
+
+		tuples_eq.push_back(test_tuple_new("[%u]", 0));
+		tuples_eq.push_back(test_tuple_new("[%uNIL]", 0));
+
+		tuples_eq.push_back(test_tuple_new("[%u]", 0));
+		tuples_eq.push_back(test_tuple_new("[%u]", 0));
+	}
+
+	std::vector<struct tuple *> tuples_gt = {
+		/* Regular cases. */
+		test_tuple_new("[%u%u]", 0, 1),
+		test_tuple_new("[%u%u]", 0, 0),
+
+		/* The first field is not indexed. */
+		test_tuple_new("[%u%u]", 0, 1),
+		test_tuple_new("[%u%u]", 1, 0),
+	};
+
+	if (is_nullable_and_has_optional_parts) {
+		/* NILs and unexisting parts. */
+		tuples_gt.push_back(test_tuple_new("[%u%u]", 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%uNIL]", 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u]", 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u]", 0));
+	}
+
+	assert(tuples_eq.size() % 2 == 0);
+	for (size_t i = 0; i < tuples_eq.size(); i += 2) {
+		struct tuple *a = tuples_eq[i];
+		struct tuple *b = tuples_eq[i + 1];
+		test_tuple_compare_with_key(a, b, key_def, 0, funcname);
+		test_tuple_compare_with_key(b, a, key_def, 0, funcname);
+	}
+
+	assert(tuples_gt.size() % 2 == 0);
+	for (size_t i = 0; i < tuples_gt.size(); i += 2) {
+		struct tuple *a = tuples_gt[i];
+		struct tuple *b = tuples_gt[i + 1];
+		test_tuple_compare_with_key(a, b, key_def, 1, funcname);
+		test_tuple_compare_with_key(b, a, key_def, -1, funcname);
+	}
+
+	for (size_t i = 0; i < tuples_eq.size(); i++) {
+		tuple_delete(tuples_eq[i]);
+	}
+
+	for (size_t i = 0; i < tuples_gt.size(); i++) {
+		tuple_delete(tuples_gt[i]);
+	}
+
+	key_def_delete(key_def);
+
+	free((void *)funcname);
+
+	footer();
+	check_plan();
+}
+
+static void
+test_tuple_compare_with_key_slowpath(bool is_nullable, bool has_optional_parts)
+{
+	size_t p = 14 + (is_nullable ? 10 : 0) + (has_optional_parts ? 40 : 0);
+	plan(p);
+	header();
+
+	/* has_optional_parts is only valid if is_nullable. */
+	assert(!has_optional_parts || is_nullable);
+
+	/* Type is number to prevent from using precompiled comparators. */
+	const bool last_is_nullable = has_optional_parts;
+	struct key_def *key_def = test_key_def_new(
+		"[{%s%u%s%s}{%s%u%s%s%s%b}{%s%u%s%s%s%b}]",
+		"field", 1, "type", "number",
+		"field", 2, "type", "number", "is_nullable", is_nullable,
+		"field", 3, "type", "number", "is_nullable", last_is_nullable);
+
+	/* Update has_optional_parts if the last parts can't be nil. */
+	size_t min_field_count = tuple_format_min_field_count(&key_def, 1,
+							      NULL, 0);
+	key_def_update_optionality(key_def, min_field_count);
+
+	const char *funcname = (const char *)xstrdup(tt_sprintf(
+		"tuple_compare_with_key_slowpath<%s, %s>", is_nullable ?
+		"true" : "false", has_optional_parts ? "true" : "false"));
+
+	std::vector<struct tuple *> tuples_eq = {
+		/* Regular case. */
+		test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0),
+		test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0),
+
+		/* The first field is not indexed. */
+		test_tuple_new("[%u%u%u%u]", 1, 0, 0, 0),
+		test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0),
+	};
+
+	if (is_nullable) {
+		/* NILs. */
+		tuples_eq.push_back(test_tuple_new("[%u%uNIL%u]", 0, 0, 0));
+		tuples_eq.push_back(test_tuple_new("[%u%uNIL%u]", 0, 0, 0));
+	}
+
+	if (has_optional_parts) {
+		/* NILs and unexisting parts. */
+		tuples_eq.push_back(test_tuple_new("[%u%uNILNIL]", 0, 0));
+		tuples_eq.push_back(test_tuple_new("[%u%uNILNIL]", 0, 0));
+
+		tuples_eq.push_back(test_tuple_new("[%u%uNIL]", 0, 0));
+		tuples_eq.push_back(test_tuple_new("[%u%uNILNIL]", 0, 0));
+
+		tuples_eq.push_back(test_tuple_new("[%u%u]", 0, 0));
+		tuples_eq.push_back(test_tuple_new("[%u%uNILNIL]", 0, 0));
+
+		tuples_eq.push_back(test_tuple_new("[%u%uNIL]", 0, 0));
+		tuples_eq.push_back(test_tuple_new("[%u%uNIL]", 0, 0));
+
+		tuples_eq.push_back(test_tuple_new("[%u%u]", 0, 0));
+		tuples_eq.push_back(test_tuple_new("[%u%uNIL]", 0, 0));
+
+		tuples_eq.push_back(test_tuple_new("[%u%u]", 0, 0));
+		tuples_eq.push_back(test_tuple_new("[%u%u]", 0, 0));
+	}
+
+	std::vector<struct tuple *> tuples_gt = {
+		/* Regular cases. */
+		test_tuple_new("[%u%u%u%u]", 0, 1, 0, 0),
+		test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0),
+
+		test_tuple_new("[%u%u%u%u]", 0, 0, 1, 0),
+		test_tuple_new("[%u%u%u%u]", 0, 0, 0, 1),
+
+		test_tuple_new("[%u%u%u%u]", 0, 0, 0, 1),
+		test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0),
+
+		test_tuple_new("[%u%u%u%u]", 0, 1, 0, 0),
+		test_tuple_new("[%u%u%u%u]", 0, 0, 1, 1),
+
+		/* The first field is not indexed. */
+		test_tuple_new("[%u%u%u%u]", 0, 1, 0, 0),
+		test_tuple_new("[%u%u%u%u]", 1, 0, 0, 0),
+	};
+
+	if (is_nullable) {
+		/* NILs. */
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL%u]", 0, 1, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 1, 1));
+
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL%u]", 0, 1, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL%u]", 0, 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL%u]", 0, 0, 1));
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL%u]", 0, 0, 0));
+	}
+
+	if (has_optional_parts) {
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u%uNIL]", 0, 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%uNIL]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%uNILNIL]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%uNILNIL]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%uNIL]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%uNIL]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%uNILNIL]", 0, 1));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 1, 1));
+
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL]", 0, 1));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 1, 1));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u]", 0, 1));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 1, 1));
+
+		tuples_gt.push_back(test_tuple_new("[%u%uNILNIL]", 0, 1));
+		tuples_gt.push_back(test_tuple_new("[%u%u%uNIL]", 0, 0, 1));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%uNIL]", 0, 1, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 1, 1));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 1, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 1, 1));
+	}
+
+	assert(tuples_eq.size() % 2 == 0);
+	for (size_t i = 0; i < tuples_eq.size(); i += 2) {
+		struct tuple *a = tuples_eq[i];
+		struct tuple *b = tuples_eq[i + 1];
+		test_tuple_compare_with_key(a, b, key_def, 0, funcname);
+		test_tuple_compare_with_key(b, a, key_def, 0, funcname);
+	}
+
+	assert(tuples_gt.size() % 2 == 0);
+	for (size_t i = 0; i < tuples_gt.size(); i += 2) {
+		struct tuple *a = tuples_gt[i];
+		struct tuple *b = tuples_gt[i + 1];
+		test_tuple_compare_with_key(a, b, key_def, 1, funcname);
+		test_tuple_compare_with_key(b, a, key_def, -1, funcname);
+	}
+
+	for (size_t i = 0; i < tuples_eq.size(); i++) {
+		tuple_delete(tuples_eq[i]);
+	}
+
+	for (size_t i = 0; i < tuples_gt.size(); i++) {
+		tuple_delete(tuples_gt[i]);
+	}
+
+	key_def_delete(key_def);
+
+	free((void *)funcname);
+
+	footer();
+	check_plan();
+}
+
+static void
+test_tuple_compare(struct tuple *tuple_a, struct tuple *tuple_b,
+		   struct key_def *cmp_def, int expected,
+		   const char *funcname)
+{
+	int rc = tuple_compare(tuple_a, HINT_NONE,
+			       tuple_b, HINT_NONE,
+			       cmp_def);
+	ok(rc == expected, "%s(%s, %s) = %d, expected %d.", funcname,
+	   tuple_str(tuple_a), tuple_str(tuple_b), rc, expected);
+}
+
+static void
+test_tuple_compare_slowpath(bool is_nullable, bool has_optional_parts,
+			    bool is_unique)
+{
+	size_t p = 12 + (is_nullable ? 10 : 0) + (has_optional_parts ? 50 : 0);
+	plan(p);
+	header();
+
+	/* has_optional_parts is only valid if is_nullable. */
+	assert(!has_optional_parts || is_nullable);
+
+	const char *funcname = (const char *)xstrdup(tt_sprintf(
+		"tuple_compare_slowpath<%s, %s, key_def.is_unique = %s>",
+		is_nullable ? "true" : "false",
+		has_optional_parts ? "true" : "false",
+		is_unique ? "true" : "false"));
+
+	struct key_def *pk_def = test_key_def_new(
+		"[{%s%u%s%s}]",
+		"field", 0, "type", "unsigned");
+
+	/* Type is number to prevent using precompiled comparators. */
+	const bool last_is_nullable = has_optional_parts;
+	struct key_def *key_def = test_key_def_new(
+		"[{%s%u%s%s}{%s%u%s%s%s%b}{%s%u%s%s%s%b}]",
+		"field", 1, "type", "number",
+		"field", 2, "type", "number", "is_nullable", is_nullable,
+		"field", 3, "type", "number", "is_nullable", last_is_nullable);
+
+	struct key_def *cmp_def = key_def_merge(key_def, pk_def);
+
+	if (is_unique) {
+		/*
+		 * It's assumed that PK and SK index different parts. So we
+		 * cover cmp_def->unique_part_count < cmp_def->part_count
+		 * branch of the slowpath comparator (its last loop).
+		 */
+		assert(cmp_def->unique_part_count > key_def->part_count);
+		cmp_def->unique_part_count = key_def->part_count;
+	}
+
+	/* Update has_optional_parts if the last parts can't be nil. */
+	struct key_def *keys[] = {pk_def, key_def};
+	size_t min_field_count = tuple_format_min_field_count(
+		keys, lengthof(keys), NULL, 0);
+	key_def_update_optionality(cmp_def, min_field_count);
+
+	std::vector<struct tuple *> tuples_eq = {
+		/* Regular case. */
+		test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0),
+		test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0),
+	};
+
+	std::vector<struct tuple *> tuples_gt = {
+		/* Regular case. */
+		test_tuple_new("[%u%u%u%u]", 0, 1, 0, 0),
+		test_tuple_new("[%u%u%u%u]", 0, 0, 1, 1),
+
+		test_tuple_new("[%u%u%u%u]", 0, 1, 0, 0),
+		test_tuple_new("[%u%u%u%u]", 0, 0, 0, 1),
+
+		test_tuple_new("[%u%u%u%u]", 0, 0, 1, 0),
+		test_tuple_new("[%u%u%u%u]", 0, 0, 0, 1),
+
+		test_tuple_new("[%u%u%u%u]", 0, 0, 0, 1),
+		test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0),
+	};
+
+	if (is_unique) {
+		if (is_nullable) {
+			/* Tuples are equal by SK, so PK is ignored. */
+			tuples_eq.push_back(
+				test_tuple_new("[%u%u%u%u]", 1, 0, 0, 0));
+			tuples_eq.push_back(
+				test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+		} else {
+			/*
+			 * FIXME: tuple_compare_slowpath has a logic I don't
+			 * quite understand. If the tuples are equal by SK and
+			 * we have no nils met, we should skip the PK comparison
+			 * and conclude the tuples are equal, but the comparator
+			 * has this `!is_nullable` condition making it compare
+			 * all parts of the key (including PK).
+			 *
+			 * Please remove this `if` statement and only keep its
+			 * `then` clause if the behaviour is fixed. Also please
+			 * move the declaration of tuples_gt below to make the
+			 * code more granulated.
+			 */
+			tuples_gt.push_back(
+				test_tuple_new("[%u%u%u%u]", 1, 0, 0, 0));
+			tuples_gt.push_back(
+				test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+		}
+	}
+
+	if (is_nullable) {
+		/* NILs. */
+		tuples_eq.push_back(test_tuple_new("[%u%uNIL%u]", 0, 0, 0));
+		tuples_eq.push_back(test_tuple_new("[%u%uNIL%u]", 0, 0, 0));
+	}
+
+	if (has_optional_parts) {
+		/* NILs & unexisting fields. */
+		tuples_eq.push_back(test_tuple_new("[%u%u%uNIL]", 0, 0, 0));
+		tuples_eq.push_back(test_tuple_new("[%u%u%uNIL]", 0, 0, 0));
+
+		tuples_eq.push_back(test_tuple_new("[%u%u%u]", 0, 0, 0));
+		tuples_eq.push_back(test_tuple_new("[%u%u%uNIL]", 0, 0, 0));
+
+		tuples_eq.push_back(test_tuple_new("[%u%uNILNIL]", 0, 0));
+		tuples_eq.push_back(test_tuple_new("[%u%uNILNIL]", 0, 0));
+
+		tuples_eq.push_back(test_tuple_new("[%u%uNIL]", 0, 0));
+		tuples_eq.push_back(test_tuple_new("[%u%uNILNIL]", 0, 0));
+
+		tuples_eq.push_back(test_tuple_new("[%u%u]", 0, 0));
+		tuples_eq.push_back(test_tuple_new("[%u%uNILNIL]", 0, 0));
+
+		tuples_eq.push_back(test_tuple_new("[%u%uNIL]", 0, 0));
+		tuples_eq.push_back(test_tuple_new("[%u%uNIL]", 0, 0));
+
+		tuples_eq.push_back(test_tuple_new("[%u%u]", 0, 0));
+		tuples_eq.push_back(test_tuple_new("[%u%uNIL]", 0, 0));
+
+		tuples_eq.push_back(test_tuple_new("[%u%u]", 0, 0));
+		tuples_eq.push_back(test_tuple_new("[%u%u]", 0, 0));
+	}
+
+	if (!is_unique) {
+		/* Tuples are equal by SK, but it's non-unique. */
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 1, 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+	}
+
+	if (is_nullable) {
+		/* NILs. */
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL%u]", 0, 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL%u]", 0, 1, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL%u]", 0, 0, 1));
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL%u]", 0, 0, 0));
+
+		/*
+		 * Even if the SK is unique and the tuples are equal,
+		 * they contain nils, so PK is compared too.
+		 */
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL%u]", 1, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL%u]", 0, 0, 0));
+	}
+
+	if (has_optional_parts) {
+		/* NILs. */
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u%uNIL]", 0, 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%uNIL]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL%u]", 0, 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%uNILNIL]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%uNIL]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%uNILNIL]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL%u]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%uNILNIL]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%uNILNIL]", 0, 1));
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL%u]", 0, 0, 1));
+
+		/* Unexisting fields. */
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL%u]", 0, 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%uNIL]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%uNIL]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%uNILNIL]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL%u]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL%u]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u]", 0, 0));
+	}
+
+	assert(tuples_eq.size() % 2 == 0);
+	for (size_t i = 0; i < tuples_eq.size(); i += 2) {
+		struct tuple *a = tuples_eq[i];
+		struct tuple *b = tuples_eq[i + 1];
+		test_tuple_compare(a, b, cmp_def, 0, funcname);
+		test_tuple_compare(b, a, cmp_def, 0, funcname);
+	}
+
+	assert(tuples_gt.size() % 2 == 0);
+	for (size_t i = 0; i < tuples_gt.size(); i += 2) {
+		struct tuple *a = tuples_gt[i];
+		struct tuple *b = tuples_gt[i + 1];
+		test_tuple_compare(a, b, cmp_def, 1, funcname);
+		test_tuple_compare(b, a, cmp_def, -1, funcname);
+	}
+
+	for (size_t i = 0; i < tuples_eq.size(); i++) {
+		tuple_delete(tuples_eq[i]);
+	}
+
+	for (size_t i = 0; i < tuples_gt.size(); i++) {
+		tuple_delete(tuples_gt[i]);
+	}
+
+	key_def_delete(key_def);
+	key_def_delete(pk_def);
+	key_def_delete(cmp_def);
+
+	free((void *)funcname);
+
+	footer();
+	check_plan();
+}
+
+static void
+test_tuple_compare_with_key_sequential(bool is_nullable,
+				       bool has_optional_parts)
+{
+	size_t p = 10 + (is_nullable ? 10 : 0) + (has_optional_parts ? 46 : 0);
+	plan(p);
+	header();
+
+	/* has_optional_parts is only valid if is_nullable. */
+	assert(!has_optional_parts || is_nullable);
+
+	/* Type is number to prevent from using precompiled comparators. */
+	const bool last_is_nullable = has_optional_parts;
+	struct key_def *key_def = test_key_def_new(
+		"[{%s%u%s%s}{%s%u%s%s%s%b}{%s%u%s%s%s%b}]",
+		"field", 0, "type", "number",
+		"field", 1, "type", "number", "is_nullable", is_nullable,
+		"field", 2, "type", "number", "is_nullable", last_is_nullable);
+
+	/* Update has_optional_parts if the last parts can't be nil. */
+	size_t min_field_count = tuple_format_min_field_count(&key_def, 1,
+							      NULL, 0);
+	key_def_update_optionality(key_def, min_field_count);
+
+	const char *funcname = (const char *)xstrdup(tt_sprintf(
+		"tuple_compare_with_key_sequential<%s, %s>", is_nullable ?
+		"true" : "false", has_optional_parts ? "true" : "false"));
+
+	std::vector<struct tuple *> tuples_eq = {
+		/* Regular case. */
+		test_tuple_new("[%u%u%u]", 0, 0, 0),
+		test_tuple_new("[%u%u%u]", 0, 0, 0),
+	};
+
+	if (is_nullable) {
+		/* NILs. */
+		tuples_eq.push_back(test_tuple_new("[%uNIL%u]", 0, 0));
+		tuples_eq.push_back(test_tuple_new("[%uNIL%u]", 0, 0));
+	}
+
+	if (has_optional_parts) {
+		/* NILs and unexisting parts. */
+		tuples_eq.push_back(test_tuple_new("[%uNILNIL]", 0));
+		tuples_eq.push_back(test_tuple_new("[%uNILNIL]", 0));
+
+		tuples_eq.push_back(test_tuple_new("[%uNIL]", 0));
+		tuples_eq.push_back(test_tuple_new("[%uNILNIL]", 0));
+
+		tuples_eq.push_back(test_tuple_new("[%u]", 0));
+		tuples_eq.push_back(test_tuple_new("[%uNILNIL]", 0));
+
+		tuples_eq.push_back(test_tuple_new("[%uNIL]", 0));
+		tuples_eq.push_back(test_tuple_new("[%uNIL]", 0));
+
+		tuples_eq.push_back(test_tuple_new("[%u]", 0));
+		tuples_eq.push_back(test_tuple_new("[%uNIL]", 0));
+
+		tuples_eq.push_back(test_tuple_new("[%u]", 0));
+		tuples_eq.push_back(test_tuple_new("[%u]", 0));
+	}
+
+	std::vector<struct tuple *> tuples_gt = {
+		/* Regular cases. */
+		test_tuple_new("[%u%u%u]", 1, 0, 0),
+		test_tuple_new("[%u%u%u]", 0, 0, 0),
+
+		test_tuple_new("[%u%u%u]", 0, 1, 0),
+		test_tuple_new("[%u%u%u]", 0, 0, 1),
+
+		test_tuple_new("[%u%u%u]", 0, 0, 1),
+		test_tuple_new("[%u%u%u]", 0, 0, 0),
+
+		test_tuple_new("[%u%u%u]", 1, 0, 0),
+		test_tuple_new("[%u%u%u]", 0, 1, 1),
+	};
+
+	if (is_nullable) {
+		/* NILs. */
+		tuples_gt.push_back(test_tuple_new("[%uNIL%u]", 1, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 1, 1));
+
+		tuples_gt.push_back(test_tuple_new("[%uNIL%u]", 1, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%uNIL%u]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%uNIL%u]", 0, 1));
+		tuples_gt.push_back(test_tuple_new("[%uNIL%u]", 0, 0));
+	}
+
+	if (has_optional_parts) {
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u]", 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%uNILNIL]", 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%uNIL]", 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u]", 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL]", 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%uNILNIL]", 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u]", 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%uNILNIL]", 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL]", 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%uNIL]", 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u]", 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%uNIL]", 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL]", 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u]", 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u]", 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u]", 0));
+
+		tuples_gt.push_back(test_tuple_new("[%uNILNIL]", 1));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 1, 1));
+
+		tuples_gt.push_back(test_tuple_new("[%uNIL]", 1));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 1, 1));
+
+		tuples_gt.push_back(test_tuple_new("[%u]", 1));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 1, 1));
+
+		tuples_gt.push_back(test_tuple_new("[%uNILNIL]", 1));
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL]", 0, 1));
+
+		tuples_gt.push_back(test_tuple_new("[%u%uNIL]", 1, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 1, 1));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u]", 1, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u]", 0, 1, 1));
+	}
+
+	assert(tuples_eq.size() % 2 == 0);
+	for (size_t i = 0; i < tuples_eq.size(); i += 2) {
+		struct tuple *a = tuples_eq[i];
+		struct tuple *b = tuples_eq[i + 1];
+		test_tuple_compare_with_key(a, b, key_def, 0, funcname);
+		test_tuple_compare_with_key(b, a, key_def, 0, funcname);
+	}
+
+	assert(tuples_gt.size() % 2 == 0);
+	for (size_t i = 0; i < tuples_gt.size(); i += 2) {
+		struct tuple *a = tuples_gt[i];
+		struct tuple *b = tuples_gt[i + 1];
+		test_tuple_compare_with_key(a, b, key_def, 1, funcname);
+		test_tuple_compare_with_key(b, a, key_def, -1, funcname);
+	}
+
+	for (size_t i = 0; i < tuples_eq.size(); i++) {
+		tuple_delete(tuples_eq[i]);
+	}
+
+	for (size_t i = 0; i < tuples_gt.size(); i++) {
+		tuple_delete(tuples_gt[i]);
+	}
+
+	key_def_delete(key_def);
+
+	free((void *)funcname);
+
+	footer();
+	check_plan();
+}
+
+static void
+test_tuple_compare_sequential_no_optional_parts(bool is_nullable,
+						bool is_unique)
+{
+	if (is_nullable)
+		plan(16);
+	else
+		plan(6);
+	header();
+
+	/* The primary key (PK). */
+	struct key_def *pk_def = test_key_def_new(
+		"[{%s%u%s%s}]",
+		"field", 3, "type", "number");
+
+	/* The secondary key (SK). */
+	struct key_def *key_def = test_key_def_new(
+		"[{%s%u%s%s}{%s%u%s%s%s%b}{%s%u%s%s}]",
+		"field", 0, "type", "number",
+		"field", 1, "type", "number", "is_nullable", is_nullable,
+		"field", 2, "type", "number");
+
+	struct key_def *cmp_def = key_def_merge(key_def, pk_def);
+
+	/* See index_def_new(). */
+	if (is_unique) {
+		/*
+		 * It's assumed that PK and SK index different parts. So we
+		 * cover cmp_def->unique_part_count < cmp_def->part_count
+		 * branch of the sequential comparator (its last loop).
+		 */
+		assert(cmp_def->unique_part_count > key_def->part_count);
+		cmp_def->unique_part_count = key_def->part_count;
+	}
+
+	/* Update has_optional_parts (the last parts can't be nil). */
+	struct key_def *keys[] = {pk_def, key_def};
+	size_t min_field_count = tuple_format_min_field_count(
+		keys, lengthof(keys), NULL, 0);
+	key_def_update_optionality(cmp_def, min_field_count);
+
+	const char *funcname = (const char *)xstrdup(tt_sprintf(
+		"tuple_compare_sequential<%s, false, key_def->is_unique = %s>",
+		is_nullable ? "true" : "false", is_unique ? "true" : "false"));
+
+	std::vector<struct tuple *> tuples_eq = {
+		/* Regular case. */
+		test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0),
+		test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0),
+	};
+
+	std::vector<struct tuple *> tuples_gt = {
+		/* Regular case. */
+		test_tuple_new("[%u%u%u%u]", 0, 1, 0, 0),
+		test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0),
+	};
+
+	if (is_nullable) {
+		/* NILs (PK is compared even for unique SK). */
+		tuples_eq.push_back(test_tuple_new("[%uNIL%u%u]", 0, 0, 0));
+		tuples_eq.push_back(test_tuple_new("[%uNIL%u%u]", 0, 0, 0));
+	}
+
+	if (is_unique) {
+		/*
+		 * FIXME: We have inconsistent sequential comparator behavior
+		 * in case of !is_nullable && !has_optional_parts with unique
+		 * key. Please remove the condition and its `else` clause if
+		 * #8902 is solved.
+		 */
+		if (is_nullable) {
+			/* PK (field 3) does not count, if SK is unique. */
+			tuples_eq.push_back(
+				test_tuple_new("[%u%u%u%u]", 0, 0, 0, 1));
+			tuples_eq.push_back(
+				test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+		} else {
+			/*
+			 * If these tests are failed that means the issue that
+			 * was mentioned in the comment above the current `if`
+			 * has been fixed.
+			 *
+			 * If this is the case - please remove the `else`
+			 * clause and move tuples_gt declaration below so
+			 * the code slooks more granulated (tuples_eq is
+			 * filled first, and then tuples_gt).
+			 */
+			tuples_gt.push_back(
+				test_tuple_new("[%u%u%u%u]", 0, 0, 0, 1));
+			tuples_gt.push_back(
+				test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+		}
+	}
+
+	if (is_nullable) {
+		/* NILs. */
+		tuples_gt.push_back(test_tuple_new("[%uNIL%u%u]", 1, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 1, 1, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%uNIL%u%u]", 1, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+		tuples_gt.push_back(test_tuple_new("[%uNIL%u%u]", 0, 0, 0));
+
+		/* Here PK is compared even for unique SK. */
+		tuples_gt.push_back(test_tuple_new("[%uNIL%u%u]", 0, 0, 1));
+		tuples_gt.push_back(test_tuple_new("[%uNIL%u%u]", 0, 0, 0));
+	}
+
+	if (!is_unique) {
+		/* SK equal, PK differs. */
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 0, 1));
+		tuples_gt.push_back(test_tuple_new("[%u%u%u%u]", 0, 0, 0, 0));
+	}
+
+	assert(tuples_eq.size() % 2 == 0);
+	for (size_t i = 0; i < tuples_eq.size(); i += 2) {
+		struct tuple *a = tuples_eq[i];
+		struct tuple *b = tuples_eq[i + 1];
+		test_tuple_compare(a, b, cmp_def, 0, funcname);
+		test_tuple_compare(b, a, cmp_def, 0, funcname);
+	}
+
+	assert(tuples_gt.size() % 2 == 0);
+	for (size_t i = 0; i < tuples_gt.size(); i += 2) {
+		struct tuple *a = tuples_gt[i];
+		struct tuple *b = tuples_gt[i + 1];
+		test_tuple_compare(a, b, cmp_def, 1, funcname);
+		test_tuple_compare(b, a, cmp_def, -1, funcname);
+	}
+
+	for (size_t i = 0; i < tuples_eq.size(); i++) {
+		tuple_delete(tuples_eq[i]);
+	}
+
+	for (size_t i = 0; i < tuples_gt.size(); i++) {
+		tuple_delete(tuples_gt[i]);
+	}
+	key_def_delete(key_def);
+	key_def_delete(pk_def);
+	key_def_delete(cmp_def);
+
+	free((void *)funcname);
+
+	footer();
+	check_plan();
+}
+
+static void
+test_tuple_compare_sequential_nullable_with_optional_parts()
+{
+	plan(62);
+	header();
+
+	const char *funcname = "tuple_compare_sequential<true, true>";
+
+	struct key_def *pk_def = test_key_def_new(
+		"[{%s%u%s%s}]",
+		"field", 0, "type", "unsigned");
+
+	struct key_def *key_def = test_key_def_new(
+		"[{%s%u%s%s}{%s%u%s%s%s%b}{%s%u%s%s%s%b}]",
+		"field", 0, "type", "unsigned",
+		"field", 1, "type", "unsigned", "is_nullable", 1,
+		"field", 2, "type", "unsigned", "is_nullable", 1);
+
+	struct key_def *cmp_def = key_def_merge(key_def, pk_def);
+	/*
+	 * It's assumed that the PK covers one of SK's fields, so we can create
+	 * tuples with last fields omitted and at the same time the SK will be
+	 * sequential (so we use the sequential comparator with optional parts).
+	 */
+	assert(cmp_def->unique_part_count == key_def->part_count);
+
+	struct tuple *tuples_eq[] = {
+		/* Regular case. */
+		test_tuple_new("[%u%u%u]", 0, 0, 0),
+		test_tuple_new("[%u%u%u]", 0, 0, 0),
+
+		/* NILs. */
+		test_tuple_new("[%u%uNIL]", 0, 0),
+		test_tuple_new("[%u%uNIL]", 0, 0),
+
+		test_tuple_new("[%uNIL%u]", 0, 0),
+		test_tuple_new("[%uNIL%u]", 0, 0),
+
+		test_tuple_new("[%uNILNIL]", 0),
+		test_tuple_new("[%uNILNIL]", 0),
+
+		/* Unexisting fields. */
+		test_tuple_new("[%uNIL]", 0),
+		test_tuple_new("[%uNILNIL]", 0),
+
+		test_tuple_new("[%u]", 0),
+		test_tuple_new("[%uNILNIL]", 0),
+
+		test_tuple_new("[%uNIL]", 0),
+		test_tuple_new("[%uNIL]", 0),
+
+		test_tuple_new("[%u]", 0),
+		test_tuple_new("[%uNIL]", 0),
+
+		test_tuple_new("[%u]", 0),
+		test_tuple_new("[%u]", 0),
+	};
+	static_assert(lengthof(tuples_eq) % 2 == 0,
+		      "Pairs of tuples to compare");
+
+	struct tuple *tuples_gt[] = {
+		/* Regular case. */
+		test_tuple_new("[%u%u%u]", 1, 0, 0),
+		test_tuple_new("[%u%u%u]", 0, 1, 1),
+
+		test_tuple_new("[%u%u%u]", 1, 0, 0),
+		test_tuple_new("[%u%u%u]", 0, 0, 1),
+
+		test_tuple_new("[%u%u%u]", 0, 1, 0),
+		test_tuple_new("[%u%u%u]", 0, 0, 1),
+
+		test_tuple_new("[%u%u%u]", 0, 0, 1),
+		test_tuple_new("[%u%u%u]", 0, 0, 0),
+
+		/* NILs. */
+		test_tuple_new("[%u%u%u]", 0, 0, 0),
+		test_tuple_new("[%u%uNIL]", 0, 0),
+
+		test_tuple_new("[%u%u%u]", 0, 0, 0),
+		test_tuple_new("[%uNIL%u]", 0, 0),
+
+		test_tuple_new("[%u%uNIL]", 0, 0),
+		test_tuple_new("[%uNIL%u]", 0, 0),
+
+		test_tuple_new("[%u%u%u]", 0, 0, 0),
+		test_tuple_new("[%uNILNIL]", 0),
+
+		test_tuple_new("[%u%uNIL]", 0, 0),
+		test_tuple_new("[%uNILNIL]", 0),
+
+		test_tuple_new("[%uNIL%u]", 0, 0),
+		test_tuple_new("[%uNILNIL]", 0),
+
+		test_tuple_new("[%uNILNIL]", 1),
+		test_tuple_new("[%uNIL%u]", 0, 1),
+
+		/* Unexisting fields. */
+		test_tuple_new("[%u%u%u]", 0, 0, 0),
+		test_tuple_new("[%u%u]", 0, 0),
+
+		test_tuple_new("[%u%u]", 0, 0),
+		test_tuple_new("[%uNIL%u]", 0, 0),
+
+		test_tuple_new("[%u%u%u]", 0, 0, 0),
+		test_tuple_new("[%uNIL]", 0),
+
+		test_tuple_new("[%u%u%u]", 0, 0, 0),
+		test_tuple_new("[%u]", 0),
+
+		test_tuple_new("[%u%uNIL]", 0, 0),
+		test_tuple_new("[%uNIL]", 0),
+
+		test_tuple_new("[%u%uNIL]", 0, 0),
+		test_tuple_new("[%u]", 0),
+
+		test_tuple_new("[%u%u]", 0, 0),
+		test_tuple_new("[%uNILNIL]", 0),
+
+		test_tuple_new("[%u%u]", 0, 0),
+		test_tuple_new("[%uNIL]", 0),
+
+		test_tuple_new("[%u%u]", 0, 0),
+		test_tuple_new("[%u]", 0),
+
+		test_tuple_new("[%uNIL%u]", 0, 0),
+		test_tuple_new("[%uNIL]", 0),
+
+		test_tuple_new("[%uNIL%u]", 0, 0),
+		test_tuple_new("[%u]", 0),
+	};
+	static_assert(lengthof(tuples_gt) % 2 == 0,
+		      "Pairs of tuples to compare");
+
+	for (size_t i = 0; i < lengthof(tuples_eq); i += 2) {
+		struct tuple *a = tuples_eq[i];
+		struct tuple *b = tuples_eq[i + 1];
+		test_tuple_compare(a, b, cmp_def, 0, funcname);
+		test_tuple_compare(b, a, cmp_def, 0, funcname);
+	}
+
+	for (size_t i = 0; i < lengthof(tuples_gt); i += 2) {
+		struct tuple *a = tuples_gt[i];
+		struct tuple *b = tuples_gt[i + 1];
+		test_tuple_compare(a, b, cmp_def, 1, funcname);
+		test_tuple_compare(b, a, cmp_def, -1, funcname);
+	}
+
+	for (size_t i = 0; i < lengthof(tuples_eq); i++) {
+		tuple_delete(tuples_eq[i]);
+	}
+
+	for (size_t i = 0; i < lengthof(tuples_gt); i++) {
+		tuple_delete(tuples_gt[i]);
+	}
+
+	key_def_delete(key_def);
+	key_def_delete(pk_def);
+	key_def_delete(cmp_def);
+
+	footer();
+	check_plan();
+}
+
 static int
 test_main(void)
 {
-	plan(4);
+	plan(27);
 	header();
 
 	test_func_compare();
 	test_func_compare_with_key();
 	test_tuple_extract_key_raw_slowpath_nullable();
 	test_tuple_validate_key_parts_raw();
+	test_tuple_compare_sequential_nullable_with_optional_parts();
+	test_tuple_compare_sequential_no_optional_parts(true, true);
+	test_tuple_compare_sequential_no_optional_parts(true, false);
+	test_tuple_compare_sequential_no_optional_parts(false, true);
+	test_tuple_compare_sequential_no_optional_parts(false, false);
+	test_tuple_compare_with_key_sequential(true, true);
+	test_tuple_compare_with_key_sequential(true, false);
+	test_tuple_compare_with_key_sequential(false, false);
+	test_tuple_compare_slowpath(true, true, true);
+	test_tuple_compare_slowpath(true, true, false);
+	test_tuple_compare_slowpath(true, false, true);
+	test_tuple_compare_slowpath(true, false, false);
+	test_tuple_compare_slowpath(false, false, true);
+	test_tuple_compare_slowpath(false, false, false);
+	test_tuple_compare_with_key_slowpath(true, true);
+	test_tuple_compare_with_key_slowpath(true, false);
+	test_tuple_compare_with_key_slowpath(false, false);
+	test_tuple_compare_with_key_slowpath_singlepart(true);
+	test_tuple_compare_with_key_slowpath_singlepart(false);
+	test_key_compare(true);
+	test_key_compare(false);
+	test_key_compare_singlepart(true);
+	test_key_compare_singlepart(false);
 
 	footer();
 	return check_plan();
