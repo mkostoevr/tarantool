@@ -959,6 +959,10 @@ error:
 			request->after_tuple = value;
 			request->after_tuple_end = data;
 			break;
+		case IPROTO_ITERATORS:
+			request->iterators = value;
+			request->iterators_end = data;
+			break;
 		case IPROTO_SPACE_NAME:
 			request->space_name =
 				mp_decode_str(&value, &request->space_name_len);

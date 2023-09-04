@@ -2181,6 +2181,7 @@ tx_process_select(struct cmsg *m)
 	int count;
 	int rc;
 	const char *packed_pos, *packed_pos_end;
+	const char *iterators, *iterators_end;
 	bool reply_position;
 	struct request *req = &msg->dml;
 	uint32_t region_svp = region_used(&fiber()->gc);
@@ -2190,6 +2191,15 @@ tx_process_select(struct cmsg *m)
 	tx_inject_delay();
 	if (tx_resolve_space_and_index_name(&msg->dml) != 0)
 		goto error;
+	if (req->iterators != NULL) {
+		iterators = req->iterators;
+		iterators_end = req->iterators_end;
+	} else {
+		size_t iterators_size = mp_sizeof_array(1) +
+					mp_sizeof_uint(req->iterator);
+		iterators = region_allocate(&fiber()->gc, iterators_size);
+		iterators_end = iterators + iterators_size;
+	}
 	packed_pos = req->after_position;
 	packed_pos_end = req->after_position_end;
 	if (packed_pos != NULL) {
@@ -2203,7 +2213,7 @@ tx_process_select(struct cmsg *m)
 			goto error;
 	}
 	rc = box_select(req->space_id, req->index_id,
-			req->iterator, req->offset, req->limit,
+			iterators, iterators_end, req->offset, req->limit,
 			req->key, req->key_end, &packed_pos, &packed_pos_end,
 			req->fetch_position, &port);
 	if (rc < 0)
