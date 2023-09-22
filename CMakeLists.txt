@@ -337,7 +337,8 @@ add_subdirectory(connector)
 add_subdirectory(src)
 add_subdirectory(extra)
 add_subdirectory(client)
-add_subdirectory(test)
+add_subdirectory(bench)
+#add_subdirectory(test)
 add_subdirectory(doc)
 
 install (FILES README.md LICENSE doc/box-protocol.txt
