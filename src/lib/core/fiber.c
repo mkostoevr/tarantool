@@ -1744,6 +1744,122 @@ box_region_truncate(size_t size)
 	return region_truncate(&fiber()->gc, size);
 }
 
+static pthread_mutex_t perflog_mutex;
+static RLIST_HEAD(perflogs);
+
+static void
+perflog_init_subsystem()
+{
+	tt_pthread_mutex_init(&perflog_mutex, NULL);
+}
+
+static void
+perflog_init()
+{
+	struct perflog *perflog = &cord()->perflog;
+	perflog->batch_first = xcalloc(1, sizeof(*perflog->batch_first));
+	perflog->batch_current = perflog->batch_first;
+	tt_pthread_mutex_lock(&perflog_mutex);
+	rlist_add(&perflogs, &perflog->batch_first->link);
+	tt_pthread_mutex_unlock(&perflog_mutex);
+}
+
+void
+perflog_log(const char *message)
+{
+	struct perflog *perflog = &cord()->perflog;
+	struct perflog_batch *batch = perflog->batch_current;
+	if (batch->size == PERFLOG_BATCH_CAPACITY) {
+		struct perflog_batch *next = xcalloc(1, sizeof(*next));
+		batch->next = next;
+		perflog->batch_current = next;
+		batch = next;
+	}
+	size_t i = batch->size++;
+	clock_gettime(CLOCK_MONOTONIC, &batch->logs[i].t);
+	batch->logs[i].message = message;
+}
+
+struct perflog_iterator {
+	struct perflog_batch *batch;
+	size_t i;
+};
+
+struct perflog_iterator perflog_iterator_new(struct perflog_batch *batch) {
+	return (struct perflog_iterator){ batch, 0 };
+}
+
+struct perflog_iterator perflog_iterator_next(struct perflog_iterator it) {
+	if (it.batch == NULL || it.i > it.batch->size)
+		panic("Next is called on a dead iterator.");
+	if (it.i == it.batch->size)
+		return (struct perflog_iterator){ it.batch->next, 0 };
+	return (struct perflog_iterator){ it.batch, it.i + 1 };
+}
+
+static int
+timespec_cmp(struct timespec a, struct timespec b) {
+	ssize_t diff_sec = a.tv_sec - b.tv_sec;
+	ssize_t diff_nsec = a.tv_nsec - b.tv_nsec;
+	return diff_sec != 0 ? diff_sec : diff_nsec;
+}
+
+static size_t
+timespec_diff_ns(struct timespec t0, struct timespec t1)
+{
+	printf("[%zu.%zu, %zu.%zu]", t0.tv_sec, t0.tv_nsec, t1.tv_sec, t1.tv_nsec);
+	size_t diff_sec = t1.tv_sec - t0.tv_sec;
+	size_t diff_nsec = t1.tv_nsec - t0.tv_nsec;
+	if (t1.tv_nsec < t0.tv_nsec) {
+		diff_sec--;
+		diff_nsec = 1000000000 + t1.tv_nsec - t0.tv_nsec;
+	}
+	return diff_sec * 1000000000 + diff_nsec;
+}
+
+void
+perflog_report()
+{
+	struct perflog_batch *batch;
+	size_t cord_count = 0;
+	size_t perflog_count = 0;
+	rlist_foreach_entry(batch, &perflogs, link) {
+		cord_count++;
+		for (struct perflog_batch *i = batch; i; i = i->next)
+			perflog_count += i->size;
+	}
+	struct perflog_iterator *its = xcalloc(cord_count, sizeof(*its));
+	struct perflog_entry *logs = xcalloc(perflog_count, sizeof(*logs));
+	{
+		size_t i = 0;
+		rlist_foreach_entry(batch, &perflogs, link)
+			its[i++] = perflog_iterator_new(batch);
+	}
+	for (size_t logs_i = 0; logs_i < perflog_count; logs_i++) {
+		size_t least_i = 0;
+		struct perflog_iterator least = its[least_i];
+		for (size_t i = 1; i < cord_count; i++) {
+			if (its[i].batch == NULL)
+				continue;
+			if (least.batch == NULL || timespec_cmp(least.batch->logs[least.i].t, its[i].batch->logs[its[i].i].t) > 0) {
+				least = its[i];
+				least_i = i;
+			}
+		}
+		its[least_i] = perflog_iterator_next(its[least_i]);
+		if (least.batch == NULL)
+			panic("Least batch is NULL.");
+		struct perflog_entry log = least.batch->logs[least.i];
+		logs[logs_i] = log;
+		printf("%s: %zu.%zu", log.message, log.t.tv_sec, log.t.tv_nsec);
+		if (logs_i > 0)
+			printf(" (+%zu)", timespec_diff_ns(logs[logs_i - 1].t, log.t));
+		printf("\n");
+	}
+	free(its);
+	free(logs);
+}
+
 void
 cord_create(struct cord *cord, const char *name)
 {
@@ -1806,6 +1922,7 @@ cord_create(struct cord *cord, const char *name)
 	cord->sched.stack_watermark = NULL;
 #endif
 	signal_stack_init();
+	perflog_init();
 }
 
 void
@@ -2171,6 +2288,7 @@ check_stack_direction(void *prev_stack_frame)
 void
 fiber_init(int (*invoke)(fiber_func f, va_list ap))
 {
+	perflog_init_subsystem();
 	page_size = small_getpagesize();
 	stack_direction = check_stack_direction(__builtin_frame_address(0));
 	fiber_invoke = invoke;

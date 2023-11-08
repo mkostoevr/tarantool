@@ -370,6 +370,7 @@ cmsg_deliver(struct cmsg *msg)
 	 * on the last hop.
 	 */
 	struct cpipe *pipe = msg->hop->pipe;
+	perflog_log("cmsg_exec");
 	msg->hop->f(msg);
 	cmsg_dispatch(pipe, msg);
 }

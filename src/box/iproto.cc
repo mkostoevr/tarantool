@@ -1275,6 +1275,7 @@ static void
 iproto_connection_on_input(ev_loop *loop, struct ev_io *watcher,
 			   int /* revents */)
 {
+	perflog_log("on_input");
 	struct iproto_connection *con =
 		(struct iproto_connection *) watcher->data;
 	struct iostream *io = &con->io;
@@ -1434,6 +1435,7 @@ iproto_connection_on_output(ev_loop *loop, struct ev_io *watcher,
 	 * some requests don't have responses (IPROTO_WATCH).
 	 */
 	iproto_connection_feed_input(con);
+	perflog_log("on_output_done");
 }
 
 static struct iproto_connection *
@@ -2832,6 +2834,7 @@ static void
 iproto_on_accept_cb(struct evio_service *service, struct iostream *io,
 		    struct sockaddr *addr, socklen_t addrlen)
 {
+	perflog_log("accept");
 	struct iproto_thread *iproto_thread =
 		(struct iproto_thread *)service->on_accept_param;
 	iproto_thread_accept(iproto_thread, io, addr, addrlen,

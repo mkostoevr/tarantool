@@ -221,6 +221,8 @@ cpipe_flush_input(struct cpipe *pipe)
 static inline void
 cpipe_push_input(struct cpipe *pipe, struct cmsg *msg)
 {
+	perflog_log("cmsg_push");
+
 	assert(loop() == pipe->producer);
 
 	stailq_add_tail_entry(&pipe->input, msg, fifo);

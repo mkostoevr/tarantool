@@ -753,6 +753,31 @@ fiber_on_stop(struct fiber *f);
 
 struct cord_on_exit;
 
+#define PERFLOG_BATCH_CAPACITY 1024 * 1024 - 1
+
+struct perflog_entry {
+	struct timespec t;
+	const char *message;
+};
+
+struct perflog_batch {
+	struct rlist link;
+	struct perflog_batch *next;
+	size_t size;
+	struct perflog_entry logs[PERFLOG_BATCH_CAPACITY];
+};
+
+struct perflog {
+	struct perflog_batch *batch_first;
+	struct perflog_batch *batch_current;
+};
+
+void
+perflog_report();
+
+void
+perflog_log(const char *message);
+
 /**
  * @brief An independent execution unit that can be managed by a separate OS
  * thread. Each cord consists of fibers to implement cooperative multitasking
@@ -834,6 +859,8 @@ struct cord {
 	/** Slice for current fiber execution in seconds. */
 	struct fiber_slice slice;
 	char name[FIBER_NAME_INLINE];
+	/** Performance event log. */
+	struct perflog perflog;
 };
 
 extern __thread struct cord *cord_ptr;

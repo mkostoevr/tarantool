@@ -177,6 +177,7 @@ on_shutdown_f(va_list ap)
 void
 tarantool_exit(int code)
 {
+	perflog_report();
 	start_loop = false;
 	if (is_shutting_down) {
 		/*
