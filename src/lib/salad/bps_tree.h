@@ -1443,6 +1443,9 @@ bps_tree_build(struct bps_tree *t, bps_tree_elem_t *sorted_array,
 	/* Initializing by {0} to suppress compile warnings (gh-1287) */
 	bps_tree_block_id_t level_block_count[BPS_TREE_MAX_DEPTH] = {0};
 	bps_tree_block_id_t level_child_count[BPS_TREE_MAX_DEPTH] = {0};
+#ifdef BPS_BLOCK_CHILD_POWER_ARRAY
+	bps_tree_block_power_t level_power[BPS_TREE_MAX_DEPTH] = {0};
+#endif
 	struct bps_inner *parents[BPS_TREE_MAX_DEPTH];
 	level_count = leaf_count;
 	for (bps_tree_block_id_t i = 0; i < depth - 1; i++) {
@@ -1496,10 +1499,6 @@ bps_tree_build(struct bps_tree *t, bps_tree_elem_t *sorted_array,
 				}
 				parents[i]->header.type = BPS_TREE_BT_INNER;
 				parents[i]->header.size = 0;
-#ifdef BPS_BLOCK_CHILD_POWER_ARRAY
-				memset(parents[i]->child_powers, 0,
-				       sizeof(parents[i]->child_powers));
-#endif
 				inner_count++;
 			}
 			parents[i]->child_ids[parents[i]->header.size] =
@@ -1513,16 +1512,16 @@ bps_tree_build(struct bps_tree *t, bps_tree_elem_t *sorted_array,
 			}
 		}
 
+		bps_tree_elem_t insert_value = current[leaf->header.size - 1];
 #ifdef BPS_BLOCK_CHILD_POWER_ARRAY
 		bps_tree_block_power_t insert_power = leaf->header.size;
-		for (bps_tree_block_id_t i = 0; i < depth - 1; i++) {
-			parents[i]->child_powers[parents[i]->header.size] +=
-				insert_power;
-		}
 #endif
-
-		bps_tree_elem_t insert_value = current[leaf->header.size - 1];
 		for (bps_tree_block_id_t i = 0; i < depth - 1; i++) {
+#ifdef BPS_BLOCK_CHILD_POWER_ARRAY
+			parents[i]->child_powers[parents[i]->header.size] =
+				insert_power;
+			level_power[i] += insert_power;
+#endif
 			parents[i]->header.size++;
 			bps_tree_block_id_t max_size = level_child_count[i] /
 						       level_block_count[i];
@@ -1534,6 +1533,10 @@ bps_tree_build(struct bps_tree *t, bps_tree_elem_t *sorted_array,
 				parents[i] = 0;
 				level_child_count[i] -= max_size;
 				level_block_count[i]--;
+#ifdef BPS_BLOCK_CHILD_POWER_ARRAY
+				insert_power = level_power[i];
+				level_power[i] = 0;
+#endif
 			}
 		}
 
@@ -1547,6 +1550,9 @@ bps_tree_build(struct bps_tree *t, bps_tree_elem_t *sorted_array,
 	for (bps_tree_block_id_t i = 0; i < depth - 1; i++) {
 		assert(level_child_count[i] == 0);
 		assert(level_block_count[i] == 0);
+#ifdef BPS_BLOCK_CHILD_POWER_ARRAY
+		assert(level_power[i] == 0);
+#endif
 		assert(parents[i] == 0);
 	}
 
