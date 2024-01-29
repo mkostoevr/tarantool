@@ -168,6 +168,26 @@ extent_free(void *ctx, void *extent)
 	free(extent);
 }
 
+#define INSERT_AND_CHECK(tree, v) do { \
+	fail_unless(test_find(tree, v) == NULL); \
+	test_insert(tree, v, 0, 0); \
+	fail_unless(test_find(tree, v) != NULL); \
+	if (test_debug_check(tree)) { \
+		test_print(tree, TYPE_F); \
+		fail("debug check nonzero", "true"); \
+	} \
+} while (false)
+
+#define DELETE_AND_CHECK(tree, v) do { \
+	fail_unless(test_find(tree, v) != NULL); \
+	test_delete(tree, v); \
+	fail_unless(test_find(tree, v) == NULL); \
+	if (test_debug_check(tree)) { \
+		test_print(tree, TYPE_F); \
+		fail("debug check nonzero", "true"); \
+	} \
+} while (false)
+
 static void
 simple_check()
 {
@@ -177,139 +197,254 @@ simple_check()
 	matras_stats_create(&stats);
 	stats.extent_count = extents_count;
 
-	const unsigned int rounds = 2000;
+	const int rounds = 2000;
 	test tree;
 	test_create(&tree, 0, extent_alloc, extent_free, &extents_count,
 		    &stats);
 
 	printf("Insert 1..X, remove 1..X\n");
-	for (unsigned int i = 0; i < rounds; i++) {
-		type_t v = i;
-		if (test_find(&tree, v) != NULL)
-			fail("element already in tree (1)", "true");
-		test_insert(&tree, v, 0, 0);
-		if (test_debug_check(&tree)) {
-			test_print(&tree, TYPE_F);
-			fail("debug check nonzero", "true");
-		}
-	}
-	if (test_size(&tree) != rounds)
-		fail("Tree count mismatch (1)", "true");
-	if ((int)stats.extent_count != extents_count)
-		fail("Extent count mismatch (1)", "true");
 
-	for (unsigned int i = 0; i < rounds; i++) {
-		type_t v = i;
-		if (test_find(&tree, v) == NULL)
-			fail("element in tree (1)", "false");
-		test_delete(&tree, v);
-		if (test_debug_check(&tree)) {
-			test_print(&tree, TYPE_F);
-			fail("debug check nonzero", "true");
-		}
-	}
-	if (test_size(&tree) != 0)
-		fail("Tree count mismatch (2)", "true");
-	if ((int)stats.extent_count != extents_count)
-		fail("Extent count mismatch (2)", "true");
+	for (int i = 0; i < rounds; i++)
+		INSERT_AND_CHECK(&tree, i);
+	fail_unless(test_size(&tree) == (size_t)rounds);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	for (int i = 0; i < rounds; i++)
+		DELETE_AND_CHECK(&tree, i);
+	fail_unless(test_size(&tree) == 0);
+	fail_unless((int)stats.extent_count == extents_count);
 
 	printf("Insert 1..X, remove X..1\n");
-	for (unsigned int i = 0; i < rounds; i++) {
-		type_t v = i;
-		if (test_find(&tree, v) != NULL)
-			fail("element already in tree (2)", "true");
-		test_insert(&tree, v, 0, 0);
-		if (test_debug_check(&tree)) {
-			test_print(&tree, TYPE_F);
-			fail("debug check nonzero", "true");
-		}
-	}
-	if (test_size(&tree) != rounds)
-		fail("Tree count mismatch (3)", "true");
-	if ((int)stats.extent_count != extents_count)
-		fail("Extent count mismatch (3)", "true");
 
-	for (unsigned int i = 0; i < rounds; i++) {
-		type_t v = rounds - 1 - i;
-		if (test_find(&tree, v) == NULL)
-			fail("element in tree (2)", "false");
-		test_delete(&tree, v);
-		if (test_debug_check(&tree)) {
-			test_print(&tree, TYPE_F);
-			fail("debug check nonzero", "true");
-		}
-	}
-	if (test_size(&tree) != 0)
-		fail("Tree count mismatch (4)", "true");
-	if ((int)stats.extent_count != extents_count)
-		fail("Extent count mismatch (4)", "true");
+	for (int i = 0; i < rounds; i++)
+		INSERT_AND_CHECK(&tree, i);
+	fail_unless(test_size(&tree) == (size_t)rounds);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	for (int i = rounds - 1; i >= 0; i--)
+		DELETE_AND_CHECK(&tree, i);
+	fail_unless(test_size(&tree) == 0);
+	fail_unless((int)stats.extent_count == extents_count);
 
 	printf("Insert X..1, remove 1..X\n");
-	for (unsigned int i = 0; i < rounds; i++) {
-		type_t v = rounds - 1 - i;
-		if (test_find(&tree, v) != NULL)
-			fail("element already in tree (3)", "true");
-		test_insert(&tree, v, 0, 0);
-		if (test_debug_check(&tree)) {
-			test_print(&tree, TYPE_F);
-			fail("debug check nonzero", "true");
-		}
-	}
-	if (test_size(&tree) != rounds)
-		fail("Tree count mismatch (5)", "true");
-	if ((int)stats.extent_count != extents_count)
-		fail("Extent count mismatch (5)", "true");
 
-	for (unsigned int i = 0; i < rounds; i++) {
-		type_t v = i;
-		if (test_find(&tree, v) == NULL)
-			fail("element in tree (3)", "false");
-		test_delete(&tree, v);
-		if (test_debug_check(&tree)) {
-			test_print(&tree, TYPE_F);
-			fail("debug check nonzero", "true");
-		}
-	}
-	if (test_size(&tree) != 0)
-		fail("Tree count mismatch (6)", "true");
-	if ((int)stats.extent_count != extents_count)
-		fail("Extent count mismatch (6)", "true");
+	for (int i = rounds - 1; i >= 0; i--)
+		INSERT_AND_CHECK(&tree, i);
+	fail_unless(test_size(&tree) == (size_t)rounds);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	for (int i = 0; i < rounds; i++)
+		DELETE_AND_CHECK(&tree, i);
+	fail_unless(test_size(&tree) == 0);
+	fail_unless((int)stats.extent_count == extents_count);
 
 	printf("Insert X..1, remove X..1\n");
-	for (unsigned int i = 0; i < rounds; i++) {
-		type_t v = rounds - 1 - i;
-		if (test_find(&tree, v) != NULL)
-			fail("element already in tree (4)", "true");
-		test_insert(&tree, v, 0, 0);
-		if (test_debug_check(&tree)) {
-			fail("debug check nonzero", "true");
-			test_print(&tree, TYPE_F);
-		}
-	}
-	if (test_size(&tree) != rounds)
-		fail("Tree count mismatch (7)", "true");
-	if ((int)stats.extent_count != extents_count)
-		fail("Extent count mismatch (7)", "true");
 
-	for (unsigned int i = 0; i < rounds; i++) {
-		type_t v = rounds - 1 - i;
-		if (test_find(&tree, v) == NULL)
-			fail("element in tree (4)", "false");
-		test_delete(&tree, v);
-		if (test_debug_check(&tree)) {
-			test_print(&tree, TYPE_F);
-			fail("debug check nonzero", "true");
-		}
-	}
-	if (test_size(&tree) != 0)
-		fail("Tree count mismatch (8)", "true");
-	if ((int)stats.extent_count != extents_count)
-		fail("Extent count mismatch (8)", "true");
+	for (int i = rounds - 1; i >= 0; i--)
+		INSERT_AND_CHECK(&tree, i);
+	fail_unless(test_size(&tree) == (size_t)rounds);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	for (int i = rounds - 1; i >= 0; i--)
+		DELETE_AND_CHECK(&tree, i);
+	fail_unless(test_size(&tree) == 0);
+	fail_unless((int)stats.extent_count == extents_count);
 
 	test_destroy(&tree);
 
 	footer();
 }
+
+#ifdef BPS_BLOCK_CHILD_POWER_ARRAY
+
+#define INSERT_AND_CHECK_GET_POS(tree, v, expected_pos) do { \
+	size_t pos; \
+	fail_unless(test_find(tree, v) == NULL); \
+	fail_unless(test_insert_get_offset(tree, v, 0, &pos) == 0); \
+	fail_unless(pos == expected_pos); \
+	type_t *found = test_find(tree, v); \
+	fail_unless(found != NULL); \
+	fail_unless(test_find_get_offset(tree, v, &pos) == found); \
+	fail_unless(pos == expected_pos); \
+	fail_unless(test_find_by_offset(tree, pos) == found); \
+	if (test_debug_check(tree)) { \
+		test_print(tree, TYPE_F); \
+		fail("debug check nonzero", "true"); \
+	} \
+} while (false)
+
+#define DELETE_AND_CHECK_GET_POS(tree, v, expected_pos) do { \
+	size_t pos = SIZE_MAX; \
+	fail_unless(test_find(tree, v) != NULL); \
+	fail_unless(test_delete_get_offset(tree, v, &pos) == 0); \
+	fail_unless(pos == expected_pos); \
+	fail_unless(test_find(tree, v) == NULL); \
+	if (test_debug_check(tree)) { \
+		test_print(tree, TYPE_F); \
+		fail("debug check nonzero", "true"); \
+	} \
+} while (false)
+
+static void
+simple_check_get_offset()
+{
+	header();
+
+	struct matras_stats stats;
+	matras_stats_create(&stats);
+	stats.extent_count = extents_count;
+
+	const int rounds = 2000;
+	test tree;
+	test_create(&tree, 0, extent_alloc, extent_free, &extents_count,
+		    &stats);
+
+	printf("Insert 1..X, remove 1..X\n");
+
+	for (int i = 0; i < rounds; i++)
+		INSERT_AND_CHECK_GET_POS(&tree, i, (size_t)i);
+	fail_unless(test_size(&tree) == (size_t)rounds);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	for (int i = 0; i < rounds; i++)
+		DELETE_AND_CHECK_GET_POS(&tree, i, 0);
+	fail_unless(test_size(&tree) == 0);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	printf("Insert 1..X, remove X..1\n");
+
+	for (int i = 0; i < rounds; i++)
+		INSERT_AND_CHECK_GET_POS(&tree, i, (size_t)i);
+	fail_unless(test_size(&tree) == (size_t)rounds);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	for (int i = rounds - 1; i >= 0; i--)
+		DELETE_AND_CHECK_GET_POS(&tree, i, (size_t)i);
+	fail_unless(test_size(&tree) == 0);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	printf("Insert X..1, remove 1..X\n");
+
+	for (int i = rounds - 1; i >= 0; i--)
+		INSERT_AND_CHECK_GET_POS(&tree, i, 0);
+	fail_unless(test_size(&tree) == (size_t)rounds);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	for (int i = 0; i < rounds; i++)
+		DELETE_AND_CHECK_GET_POS(&tree, i, 0);
+	fail_unless(test_size(&tree) == 0);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	printf("Insert X..1, remove X..1\n");
+
+	for (int i = rounds - 1; i >= 0; i--)
+		INSERT_AND_CHECK_GET_POS(&tree, i, 0);
+	fail_unless(test_size(&tree) == (size_t)rounds);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	for (int i = rounds - 1; i >= 0; i--)
+		DELETE_AND_CHECK_GET_POS(&tree, i, (size_t)i);
+	fail_unless(test_size(&tree) == 0);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	test_destroy(&tree);
+
+	footer();
+}
+
+#define INSERT_AND_CHECK_BY_POS(tree, v, pos_to_insert) do { \
+	size_t pos; \
+	fail_unless(test_find(tree, v) == NULL); \
+	fail_unless(test_insert_by_offset(tree, v, pos_to_insert) == 0); \
+	type_t *found = test_find(tree, v); \
+	fail_unless(found != NULL); \
+	fail_unless(test_find_get_offset(tree, v, &pos) == found); \
+	fail_unless(pos == pos_to_insert); \
+	fail_unless(test_find_by_offset(tree, pos) == found); \
+	if (test_debug_check(tree)) { \
+		test_print(tree, TYPE_F); \
+		fail("debug check nonzero", "true"); \
+	} \
+} while (false)
+
+#define DELETE_AND_CHECK_BY_POS(tree, v, pos_to_delete) do { \
+	fail_unless(test_find(tree, v) != NULL); \
+	fail_unless(test_delete_by_offset(tree, pos_to_delete) == 0); \
+	fail_unless(test_find(tree, v) == NULL); \
+	if (test_debug_check(tree)) { \
+		test_print(tree, TYPE_F); \
+		fail("debug check nonzero", "true"); \
+	} \
+} while (false)
+
+static void
+simple_check_by_offset()
+{
+	header();
+
+	struct matras_stats stats;
+	matras_stats_create(&stats);
+	stats.extent_count = extents_count;
+
+	const int rounds = 2000;
+	test tree;
+	test_create(&tree, 0, extent_alloc, extent_free, &extents_count,
+		    &stats);
+
+	printf("Insert 1..X, remove 1..X\n");
+
+	for (int i = 0; i < rounds; i++)
+		INSERT_AND_CHECK_BY_POS(&tree, i, (size_t)i);
+	fail_unless(test_size(&tree) == (size_t)rounds);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	for (int i = 0; i < rounds; i++)
+		DELETE_AND_CHECK_BY_POS(&tree, i, 0);
+	fail_unless(test_size(&tree) == 0);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	printf("Insert 1..X, remove X..1\n");
+
+	for (int i = 0; i < rounds; i++)
+		INSERT_AND_CHECK_BY_POS(&tree, i, (size_t)i);
+	fail_unless(test_size(&tree) == (size_t)rounds);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	for (int i = rounds - 1; i >= 0; i--)
+		DELETE_AND_CHECK_BY_POS(&tree, i, (size_t)i);
+	fail_unless(test_size(&tree) == 0);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	printf("Insert X..1, remove 1..X\n");
+
+	for (int i = rounds - 1; i >= 0; i--)
+		INSERT_AND_CHECK_BY_POS(&tree, i, 0);
+	fail_unless(test_size(&tree) == (size_t)rounds);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	for (int i = 0; i < rounds; i++)
+		DELETE_AND_CHECK_BY_POS(&tree, i, 0);
+	fail_unless(test_size(&tree) == 0);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	printf("Insert X..1, remove X..1\n");
+
+	for (int i = rounds - 1; i >= 0; i--)
+		INSERT_AND_CHECK_BY_POS(&tree, i, 0);
+	fail_unless(test_size(&tree) == (size_t)rounds);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	for (int i = rounds - 1; i >= 0; i--)
+		DELETE_AND_CHECK_BY_POS(&tree, i, (size_t)i);
+	fail_unless(test_size(&tree) == 0);
+	fail_unless((int)stats.extent_count == extents_count);
+
+	test_destroy(&tree);
+
+	footer();
+}
+
+#endif
 
 static bool
 check_trees_are_identical(test *tree, sptree_test *spt_test)
@@ -943,7 +1078,6 @@ insert_successor_test()
 	footer();
 }
 
-
 int
 main(void)
 {
@@ -951,6 +1085,10 @@ main(void)
 	header();
 
 	simple_check();
+#ifdef BPS_BLOCK_CHILD_POWER_ARRAY
+	simple_check_get_offset();
+	simple_check_by_offset();
+#endif
 	compare_with_sptree_check();
 	compare_with_sptree_check_branches();
 	bps_tree_debug_self_check();

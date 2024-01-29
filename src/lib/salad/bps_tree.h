@@ -445,6 +445,16 @@ typedef int64_t bps_tree_block_power_t;
 #define bps_tree_print _api_name(print)
 #define bps_tree_debug_check_internal_functions \
 	_api_name(debug_check_internal_functions)
+#define bps_tree_find_get_offset_impl _bps_tree(find_get_offset_impl)
+#define bps_tree_find_get_offset _api_name(find_get_offset)
+#define bps_tree_find_by_offset_impl _bps_tree(find_by_offset_impl)
+#define bps_tree_find_by_offset _api_name(find_by_offset)
+#define bps_tree_calc_path_offset _api_name(calc_path_offset)
+#define bps_tree_insert_get_offset _api_name(insert_get_offset)
+#define bps_tree_insert_by_offset _api_name(insert_by_offset)
+#define bps_tree_replace_by_offset _api_name(replace_by_offset)
+#define bps_tree_delete_get_offset _api_name(delete_get_offset)
+#define bps_tree_delete_by_offset _api_name(delete_by_offset)
 
 #define bps_tree_max_sizes _bps_tree(max_sizes)
 #define BPS_TREE_MAX_COUNT_IN_LEAF _BPS_TREE(MAX_COUNT_IN_LEAF)
@@ -6890,6 +6900,320 @@ bps_tree_debug_check_internal_functions(bool assertme)
 #endif //#ifndef BPS_TREE_NO_DEBUG
 /* }}} */
 
+/* {{{ BPS Vector */
+
+#ifdef BPS_BLOCK_CHILD_POWER_ARRAY
+
+/**
+ * @brief Find the last child in the inner block at least one of whose elements'
+ *        offset in the tree is less than or equal to the given offset.
+ * @param inner - the block to search in.
+ * @param offset_ptr - pointer the offset to find, the power of skipped
+ *                     children is substracted from it on the function return.
+ */
+static inline bps_tree_pos_t
+bps_tree_find_ins_point_offset(struct bps_inner *inner, size_t *offset_ptr)
+{
+	bps_tree_pos_t i = 0;
+	size_t offset = *offset_ptr;
+	for (; offset && offset > (size_t)inner->child_powers[i]; i++) {
+		assert(i < inner->common.size);
+		offset -= inner->child_powers[i];
+	}
+	*offset_ptr = offset;
+	return i;
+}
+
+/**
+ * @brief Collect path to the element with the given offset.
+ */
+static inline void
+bps_tree_collect_offset_path(struct bps_tree_common *tree, size_t offset,
+			     struct bps_inner_path_elem *path,
+			     struct bps_leaf_path_elem *leaf_path_elem)
+{
+	struct bps_inner_path_elem *prev_ext = 0;
+	bps_tree_pos_t prev_pos = 0;
+	struct bps_block *block = bps_tree_root(tree);
+	bps_tree_block_id_t block_id = tree->root_id;
+	bps_tree_elem_t *max_elem_copy = &tree->max_elem;
+	bps_tree_block_id_t max_elem_block_id = (bps_tree_block_id_t)-1;
+	bps_tree_pos_t max_elem_pos = (bps_tree_pos_t)-1;
+	for (bps_tree_block_id_t i = 0; i < tree->depth - 1; i++) {
+		struct bps_inner *inner = (struct bps_inner *)block;
+		bps_tree_pos_t pos =
+			bps_tree_find_ins_point_offset(inner, &offset);
+
+		path[i].block = inner;
+		path[i].block_id = block_id;
+		path[i].insertion_point = pos;
+		path[i].pos_in_parent = prev_pos;
+		path[i].parent = prev_ext;
+		path[i].max_elem_copy = max_elem_copy;
+		path[i].max_elem_block_id = max_elem_block_id;
+		path[i].max_elem_pos = max_elem_pos;
+		path[i].unpropagated_power = -1;
+
+		if (pos < inner->header.size - 1) {
+			max_elem_copy = inner->elems + pos;
+			max_elem_block_id = block_id;
+			max_elem_pos = pos;
+		}
+		block_id = inner->child_ids[pos];
+		block = bps_tree_restore_block(tree, block_id);
+		prev_pos = pos;
+		prev_ext = path + i;
+	}
+
+	struct bps_leaf *leaf = (struct bps_leaf *)block;
+
+	leaf_path_elem->block = leaf;
+	leaf_path_elem->block_id = block_id;
+	leaf_path_elem->insertion_point = offset;
+	leaf_path_elem->pos_in_parent = prev_pos;
+	leaf_path_elem->parent = prev_ext;
+	leaf_path_elem->max_elem_copy = max_elem_copy;
+	leaf_path_elem->max_elem_block_id = max_elem_block_id;
+	leaf_path_elem->max_elem_pos = max_elem_pos;
+	leaf_path_elem->unpropagated_power = -1;
+}
+
+/**
+ * @brief Calculates the offset of an element given its path.
+ */
+static inline size_t
+bps_tree_calc_path_offset(struct bps_tree_common *tree,
+			  struct bps_leaf_path_elem *leaf_path_elem)
+{
+	size_t offset = leaf_path_elem->insertion_point;
+	struct bps_inner_path_elem *parent = leaf_path_elem->parent;
+	while (parent) {
+		bps_tree_block_id_t id = parent->block_id;
+		struct bps_inner *inner =
+			(struct bps_inner *)bps_tree_restore_block(tree, id);
+		size_t num_before = parent->insertion_point;
+		offset += bps_tree_get_first_children_power(inner, num_before);
+		parent = parent->parent;
+	}
+	return offset;
+}
+
+/**
+ * @brief Find the first element that is equal to the key (comparator returns 0)
+ *        and get its offset in the tree.
+ * @param tree - pointer to a tree.
+ * @param key - key that will be compared with elements.
+ * @param[out] offset_ptr - the offset of the element, garbage if not found.
+ * @return pointer to the first equal element or NULL if not found.
+ */
+static inline bps_tree_elem_t *
+bps_tree_find_get_offset_impl(struct bps_tree_common *tree, bps_tree_key_t key,
+			      size_t *offset_ptr)
+{
+	if (tree->root_id == (bps_tree_block_id_t)(-1))
+		return 0;
+	struct bps_block *block = bps_tree_root(tree);
+	bool exact = false;
+	size_t offset = 0;
+	for (bps_tree_block_id_t i = 0; i < tree->depth - 1; i++) {
+		struct bps_inner *inner = (struct bps_inner *)block;
+		bps_tree_pos_t pos;
+		pos = bps_tree_find_ins_point_key(tree, inner->elems,
+						  inner->header.size - 1,
+						  key, &exact);
+		offset += bps_tree_get_first_children_power(inner, pos);
+		block = bps_tree_restore_block(tree, inner->child_ids[pos]);
+	}
+
+	struct bps_leaf *leaf = (struct bps_leaf *)block;
+	bps_tree_pos_t pos;
+	pos = bps_tree_find_ins_point_key(tree, leaf->elems, leaf->header.size,
+					  key, &exact);
+	offset += pos;
+	*offset_ptr = offset;
+	if (exact)
+		return leaf->elems + pos;
+	else
+		return 0;
+}
+
+static inline bps_tree_elem_t *
+bps_tree_find_get_offset(struct bps_tree *tree, bps_tree_key_t key,
+			 size_t *offset_ptr)
+{
+	return bps_tree_find_get_offset_impl(&tree->common, key, offset_ptr);
+}
+
+static inline bps_tree_elem_t *
+bps_tree_view_find_get_offset(struct bps_tree_view *view, bps_tree_key_t key,
+			      size_t *offset_ptr)
+{
+	return bps_tree_find_get_offset_impl(&view->common, key, offset_ptr);
+}
+
+/**
+ * @brief Get the element at the given offset.
+ * @param tree - pointer to a tree.
+ * @param offset - the offset of the element.
+ * @return pointer to the element or NULL if does not exist.
+ */
+static inline bps_tree_elem_t *
+bps_tree_find_by_offset_impl(struct bps_tree_common *tree, size_t offset)
+{
+	if (offset >= tree->size)
+		return 0;
+	struct bps_block *block = bps_tree_root(tree);
+	for (bps_tree_block_id_t i = 0; i < tree->depth - 1; i++) {
+		struct bps_inner *inner = (struct bps_inner *)block;
+		bps_tree_pos_t pos = bps_tree_find_ins_point_offset(inner,
+								    &offset);
+		block = bps_tree_restore_block(tree, inner->child_ids[pos]);
+	}
+
+	struct bps_leaf *leaf = (struct bps_leaf *)block;
+	assert(offset < BPS_TREE_MAX_COUNT_IN_LEAF);
+	return leaf->elems + offset;
+}
+
+static inline bps_tree_elem_t *
+bps_tree_find_by_offset(struct bps_tree *tree, size_t offset)
+{
+	return bps_tree_find_by_offset_impl(&tree->common, offset);
+}
+
+static inline bps_tree_elem_t *
+bps_tree_view_find_by_offset(struct bps_tree_view *view, size_t offset)
+{
+	return bps_tree_find_by_offset_impl(&view->common, offset);
+}
+
+/**
+ * @sa bps_tree_insert + new parameter:
+ * @param[out] offset_ptr Offset of the new element.
+ */
+static inline int
+bps_tree_insert_get_offset(struct bps_tree *t, bps_tree_elem_t new_elem,
+			   bps_tree_elem_t *replaced, size_t *offset_ptr)
+{
+	struct bps_tree_common *tree = &t->common;
+	if (tree->root_id == (bps_tree_block_id_t)(-1)) {
+		*offset_ptr = 0;
+		return bps_tree_insert_first_elem(tree, new_elem);
+	}
+	struct bps_inner_path_elem path[BPS_TREE_MAX_DEPTH];
+	struct bps_leaf_path_elem leaf_path_elem;
+	bool exact;
+	bps_tree_collect_path(tree, new_elem, path, &leaf_path_elem, &exact);
+	*offset_ptr = bps_tree_calc_path_offset(tree, &leaf_path_elem);
+	if (exact) {
+		bps_tree_process_replace(tree, &leaf_path_elem, new_elem,
+					 replaced);
+		return 0;
+	} else {
+		bps_tree_block_id_t unused1;
+		bps_tree_pos_t unused2;
+
+		return bps_tree_process_insert_leaf(tree, &leaf_path_elem,
+						    new_elem, &unused1,
+						    &unused2);
+	}
+}
+
+/**
+ * @brief Inserts an element at the given offset.
+ * @param t - pointer to a tree.
+ * @param new_elem - element to insert.
+ * @param offset - offset to insert at.
+ */
+static inline int
+bps_tree_insert_by_offset(struct bps_tree *t, bps_tree_elem_t new_elem,
+			  size_t offset)
+{
+	struct bps_tree_common *tree = &t->common;
+	if (offset > tree->size)
+		return -1;
+	if (tree->root_id == (bps_tree_block_id_t)(-1))
+		return bps_tree_insert_first_elem(tree, new_elem);
+	struct bps_inner_path_elem path[BPS_TREE_MAX_DEPTH];
+	struct bps_leaf_path_elem leaf_path_elem;
+	bps_tree_collect_offset_path(tree, offset, path, &leaf_path_elem);
+	bps_tree_block_id_t unused1;
+	bps_tree_pos_t unused2;
+	return bps_tree_process_insert_leaf(tree, &leaf_path_elem, new_elem,
+					    &unused1, &unused2);
+}
+
+/**
+ * @brief Replaces an element at the given offset.
+ * @param t - pointer to a tree.
+ * @param new_elem - element to replace by.
+ * @param offset - offset to replace at.
+ */
+static inline int
+bps_tree_replace_by_offset(struct bps_tree *t, bps_tree_elem_t new_elem,
+			   size_t offset)
+{
+	struct bps_tree_common *tree = &t->common;
+	if (offset >= tree->size)
+		return -1;
+	struct bps_inner_path_elem path[BPS_TREE_MAX_DEPTH];
+	struct bps_leaf_path_elem leaf_path_elem;
+	bps_tree_collect_offset_path(tree, offset, path, &leaf_path_elem);
+	bps_tree_elem_t unused;
+	bps_tree_process_replace(tree, &leaf_path_elem, new_elem, &unused);
+	return 0;
+}
+
+/**
+ * @brief Delete an element from a tree and get the offset it deleted from.
+ * @param t - pointer to a tree.
+ * @param elem - the element to delete.
+ * @param[out] offset_ptr - the offset of the deleted element.
+ * @return - true on success or false if the element was not found in tree.
+ */
+static inline int
+bps_tree_delete_get_offset(struct bps_tree *t, bps_tree_elem_t elem,
+			   size_t *offset_ptr)
+{
+	struct bps_tree_common *tree = &t->common;
+	if (tree->root_id == (bps_tree_block_id_t)(-1))
+		return -1;
+	struct bps_inner_path_elem path[BPS_TREE_MAX_DEPTH];
+	struct bps_leaf_path_elem leaf_path_elem;
+	bool exact;
+	bps_tree_collect_path(tree, elem, path, &leaf_path_elem, &exact);
+	*offset_ptr = bps_tree_calc_path_offset(tree, &leaf_path_elem);
+
+	if (!exact)
+		return -1;
+
+	bps_tree_process_delete_leaf(tree, &leaf_path_elem);
+	return 0;
+}
+
+/**
+ * @brief Delete an element from a tree by its offset.
+ * @param t - pointer to a tree.
+ * @param offset - the offset to delete at.
+ * @return - true on success or false if the element was not found in tree.
+ */
+static inline int
+bps_tree_delete_by_offset(struct bps_tree *t, size_t offset)
+{
+	struct bps_tree_common *tree = &t->common;
+	if (offset >= tree->size)
+		return -1;
+	struct bps_inner_path_elem path[BPS_TREE_MAX_DEPTH];
+	struct bps_leaf_path_elem leaf_path_elem;
+	bps_tree_collect_offset_path(tree, offset, path, &leaf_path_elem);
+	bps_tree_process_delete_leaf(tree, &leaf_path_elem);
+	return 0;
+}
+
+#endif
+
+/* }}} */
+
 #undef BPS_TREE_MEMMOVE
 #undef BPS_TREE_DATAMOVE
 #undef BPS_TREE_DATAMOVE_ELEMS
@@ -6927,6 +7251,7 @@ bps_tree_debug_check_internal_functions(bool assertme)
 #undef bps_tree_find
 #undef bps_tree_view_find
 #undef bps_tree_insert
+#undef bps_tree_insert_get_iterator
 #undef bps_tree_delete
 #undef bps_tree_delete_value
 #undef bps_tree_size_impl
@@ -6970,6 +7295,16 @@ bps_tree_debug_check_internal_functions(bool assertme)
 #undef bps_tree_debug_check
 #undef bps_tree_print
 #undef bps_tree_debug_check_internal_functions
+#undef bps_tree_find_get_offset_impl
+#undef bps_tree_find_get_offset
+#undef bps_tree_find_by_offset_impl
+#undef bps_tree_find_by_offset
+#undef bps_tree_calc_path_offset
+#undef bps_tree_insert_get_offset
+#undef bps_tree_insert_by_offset
+#undef bps_tree_replace_by_offset
+#undef bps_tree_delete_get_offset
+#undef bps_tree_delete_by_offset
 
 #undef bps_tree_max_sizes
 #undef BPS_TREE_MAX_COUNT_IN_LEAF
