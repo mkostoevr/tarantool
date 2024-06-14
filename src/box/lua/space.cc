@@ -566,8 +566,13 @@ lbox_fillspace(struct lua_State *L, struct space *space, int i)
 			lua_setfield(L, -2, "hint");
 		}
 
-		lua_pushnil(L);
-		lua_setfield(L, -2, "fast_offset");
+		if (space_is_memtx(space) && index_def->type == TREE) {
+			lua_pushboolean(L, index_opts->fast_offset);
+			lua_setfield(L, -2, "fast_offset");
+		} else {
+			lua_pushnil(L);
+			lua_setfield(L, -2, "fast_offset");
+		}
 
 		if (index_opts->func_id > 0) {
 			lua_pushstring(L, "func");
