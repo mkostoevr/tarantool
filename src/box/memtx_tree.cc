@@ -726,6 +726,50 @@ prepare_start_prefix_iterator(struct memtx_tree_key_data<USE_HINT> *start_data,
 	return true;
 }
 
+static int
+memtx_tree_lookup_canonicalize(struct index *base, struct key_def *cmp_def,
+			       enum iterator_type *out_type,
+			       const char **out_key, uint32_t part_count)
+{
+	enum iterator_type type = *out_type;
+	const char *key = *out_key;
+
+	assert(part_count == 0 || key != NULL);
+	assert(type >= 0 && type < iterator_type_MAX);
+
+	static_assert(iterator_type_MAX < 32, "Too big for bit logic");
+	const uint32_t supported_mask = ((1u << (ITER_GT + 1)) - 1) |
+		(1u << ITER_NP) | (1u << ITER_PP);
+	if (((1u << type) & supported_mask) == 0) {
+		diag_set(UnsupportedIndexFeature, base->def,
+			 "requested iterator type");
+		return -1;
+	}
+
+	if ((type == ITER_NP || type == ITER_PP) && part_count > 0 &&
+	    cmp_def->parts[part_count - 1].coll != NULL) {
+		diag_set(UnsupportedIndexFeature, base->def,
+			 "requested iterator type along with collation");
+		return -1;
+	}
+
+	if (part_count == 0) {
+		/*
+		 * If no key is specified, downgrade equality
+		 * iterators to a full range.
+		 */
+		type = iterator_type_is_reverse(type) ? ITER_LE : ITER_GE;
+		key = NULL;
+	}
+
+	if (type == ITER_ALL)
+		type = ITER_GE;
+
+	*out_type = type;
+	*out_key = key;
+	return 0;
+}
+
 template <bool USE_HINT>
 static int
 tree_iterator_start(struct iterator *iterator, struct tuple **ret)
@@ -1651,33 +1695,9 @@ memtx_tree_index_create_iterator(struct index *base, enum iterator_type type,
 	struct memtx_engine *memtx = (struct memtx_engine *)base->engine;
 	struct key_def *cmp_def = memtx_tree_cmp_def(&index->tree);
 
-	assert(part_count == 0 || key != NULL);
-	assert(type >= 0 && type < iterator_type_MAX);
-	static_assert(iterator_type_MAX < 32, "Too big for bit logic");
-	const uint32_t supported_mask = ((1u << (ITER_GT + 1)) - 1) |
-		(1u << ITER_NP) | (1u << ITER_PP);
-	if (((1u << type) & supported_mask) == 0) {
-		diag_set(UnsupportedIndexFeature, base->def,
-			 "requested iterator type");
+	if (memtx_tree_lookup_canonicalize(base, cmp_def, &type,
+					   &key, part_count) == -1)
 		return NULL;
-	}
-	if ((type == ITER_NP || type == ITER_PP) && part_count > 0 &&
-	    cmp_def->parts[part_count - 1].coll != NULL) {
-		diag_set(UnsupportedIndexFeature, base->def,
-			 "requested iterator type along with collation");
-		return NULL;
-	}
-	if (part_count == 0) {
-		/*
-		 * If no key is specified, downgrade equality
-		 * iterators to a full range.
-		 */
-		type = iterator_type_is_reverse(type) ? ITER_LE : ITER_GE;
-		key = NULL;
-	}
-
-	if (type == ITER_ALL)
-		type = ITER_GE;
 
 	ERROR_INJECT(ERRINJ_INDEX_ITERATOR_NEW, {
 		diag_set(ClientError, ER_INJECTION, "iterator fail");
