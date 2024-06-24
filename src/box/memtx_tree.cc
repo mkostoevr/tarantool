@@ -770,32 +770,55 @@ memtx_tree_lookup_canonicalize(struct index *base, struct key_def *cmp_def,
 	return 0;
 }
 
-template <bool USE_HINT>
-static int
-tree_iterator_start(struct iterator *iterator, struct tuple **ret)
+enum memtx_tree_lookup_op {
+	NOOP,
+	FIRST,
+	LOWER_BOUND,
+	UPPER_BOUND,
+	INVALIDATE,
+};
+
+/* The lookup strategy to use for a request. */
+struct memtx_tree_lookup_strategy {
+	/* The initial lookup operation. */
+	enum memtx_tree_lookup_op operation;
+	/* Requirement to step back to reach the target. */
+	bool step_back;
+};
+
+/**
+ * Provides information about operation to perform on the key-based lookup. The
+ * information includes:
+ * - the actual lookup key (updated if required) in @a out_start_data;
+ * - the actual iterator type (updated if required) in @a out_type;
+ * - the lookup strategy to use in @a out_lookup.
+ */
+template<bool USE_HINT>
+static void
+memtx_tree_lookup_setup(struct memtx_tree_key_data<USE_HINT> *out_start_data,
+			struct memtx_tree_key_data<USE_HINT> after_data,
+			enum iterator_type *out_type, struct key_def *cmp_def,
+			struct region *region,
+			struct memtx_tree_lookup_strategy *out_lookup)
 {
-	struct region *region = &fiber()->gc;
-	RegionGuard region_guard(region);
-	*ret = NULL;
-	struct space *space;
-	struct index *index_base;
-	index_weak_ref_get_checked(&iterator->index_ref, &space, &index_base);
-	struct memtx_tree_index<USE_HINT> *index =
-		(struct memtx_tree_index<USE_HINT> *)index_base;
-	struct tree_iterator<USE_HINT> *it = get_tree_iterator<USE_HINT>(iterator);
-	iterator->next_internal = exhausted_iterator_next;
-	memtx_tree_t<USE_HINT> *tree = &index->tree;
-	struct txn *txn = in_txn();
-	struct key_def *cmp_def = index->base.def->cmp_def;
-	struct memtx_tree_key_data<USE_HINT> start_data =
-		it->after_data.key != NULL ? it->after_data : it->key_data;
-	enum iterator_type type = it->type;
+	assert(out_start_data != NULL);
+	assert(out_type != NULL);
+	assert(cmp_def != NULL);
+	assert(region != NULL);
+	assert(out_lookup != NULL);
+
+	enum iterator_type type = *out_type;
+	struct memtx_tree_key_data<USE_HINT> start_data = *out_start_data;
+
 	if ((type == ITER_NP || type == ITER_PP) &&
-	    it->after_data.key == NULL) {
+	    after_data.key == NULL) {
 		if (!prepare_start_prefix_iterator(&start_data, &type,
-						   cmp_def, region))
-			return 0;
+						   cmp_def, region)) {
+			out_lookup->operation = NOOP;
+			return;
+		}
 	}
+
 	/*
 	 * Since iteration with equality iterators returns first found tuple,
 	 * we need a special flag for EQ and REQ if we want to start iteration
@@ -804,33 +827,21 @@ tree_iterator_start(struct iterator *iterator, struct tuple **ret)
 	 * As for range iterators with equality, we can simply change them
 	 * to their equivalents with inequality.
 	 */
-	bool skip_equal_tuple = it->after_data.key != NULL;
+	bool skip_equal_tuple = after_data.key != NULL;
 	if (skip_equal_tuple && type != ITER_EQ && type != ITER_REQ)
 		type = iterator_type_is_reverse(type) ? ITER_LT : ITER_GT;
-	/*
-	 * The key is full - all parts a present. If key if full, EQ and REQ
-	 * queries can return no more than one tuple.
-	 */
-	bool key_is_full = start_data.part_count == cmp_def->part_count;
-	/* The flag will be change to true if found tuple equals to the key. */
-	bool equals = false;
-	assert(it->last.tuple == NULL);
+
+	/* Find the lookup strategy required. */
+	enum memtx_tree_lookup_op op;
 	if (start_data.key == NULL) {
 		assert(type == ITER_GE || type == ITER_LE);
-		if (iterator_type_is_reverse(type))
-			/*
-			 * For all reverse iterators we will step back,
-			 * see the and explanation code below.
-			 * BPS tree iterators have an interesting property:
-			 * a back step from invalid iterator set its
-			 * position to the last element. Let's use that.
-			 */
-			invalidate_tree_iterator(&it->tree_iterator);
-		else
-			it->tree_iterator = memtx_tree_first(tree);
-		/* If there is at least one tuple in the tree, it is
-		 * efficiently equals to the empty key. */
-		equals = memtx_tree_size(tree) != 0;
+		/*
+		 * For all reverse iterators we will step back, see the
+		 * explanation and code below. BPS tree iterators have an
+		 * interesting property: a back step from invalid iterator
+		 * set its position to the last element. Let's use that.
+		 */
+		op = iterator_type_is_reverse(type) ? INVALIDATE : FIRST;
 	} else {
 		/*
 		 * We use lower_bound on equality iterators instead of LE
@@ -849,16 +860,87 @@ tree_iterator_start(struct iterator *iterator, struct tuple **ret)
 		 */
 		if (skip_equal_tuple && (type == ITER_EQ || type == ITER_REQ))
 			need_lower_bound = !need_lower_bound;
-		if (need_lower_bound) {
-			it->tree_iterator =
-				memtx_tree_lower_bound(tree, &start_data,
-						       &equals);
-		} else {
-			it->tree_iterator =
-				memtx_tree_upper_bound(tree, &start_data,
-						       &equals);
-		}
+
+		op = need_lower_bound ? LOWER_BOUND : UPPER_BOUND;
 	}
+
+	/*
+	 * Because of limitations of tree search API we use lower_bound for
+	 * LT search and upper_bound for LE and REQ searches. In both cases
+	 * we find a position to the right of the target one. Let's make a
+	 * step to the left to reach target position.
+	 *
+	 * If we found an invalid iterator then all the elements in the tree
+	 * are less (less or equal) to the key, and iterator_prev call will
+	 * convert the iterator to the last position in the tree, which is
+	 * exactly what we need.
+	 */
+	bool need_step_back = iterator_type_is_reverse(type);
+
+	/* Set the output parameters. */
+	*out_type = type;
+	*out_start_data = start_data;
+	out_lookup->operation = op;
+	out_lookup->step_back = need_step_back;
+}
+
+template<bool USE_HINT>
+static int
+tree_iterator_start(struct iterator *iterator, struct tuple **ret)
+{
+	struct region *region = &fiber()->gc;
+	RegionGuard region_guard(region);
+
+	*ret = NULL;
+	iterator->next_internal = exhausted_iterator_next;
+
+	struct tree_iterator<USE_HINT> *it =
+		get_tree_iterator<USE_HINT>(iterator);
+	assert(it->last.tuple == NULL);
+
+	struct space *space;
+	struct index *index_base;
+	index_weak_ref_get_checked(&iterator->index_ref, &space, &index_base);
+	struct memtx_tree_index<USE_HINT> *index =
+		(struct memtx_tree_index<USE_HINT> *)index_base;
+	struct key_def *cmp_def = index->base.def->cmp_def;
+	struct memtx_tree_key_data<USE_HINT> start_data =
+		it->after_data.key != NULL ? it->after_data : it->key_data;
+	enum iterator_type type = it->type;
+	struct memtx_tree_lookup_strategy lookup;
+	memtx_tree_lookup_setup(&start_data, it->after_data,
+				&type, cmp_def, region, &lookup);
+
+	/* The flag will be changed to true if found tuple equals to the key. */
+	bool equals = false;
+	memtx_tree_t<USE_HINT> *tree = &index->tree;
+
+	switch (lookup.operation) {
+	case FIRST:
+		it->tree_iterator = memtx_tree_first(tree);
+		break;
+	case LOWER_BOUND:
+		it->tree_iterator = memtx_tree_lower_bound(tree, &start_data,
+							   &equals);
+		break;
+	case UPPER_BOUND:
+		it->tree_iterator = memtx_tree_upper_bound(tree, &start_data,
+							   &equals);
+		break;
+	case INVALIDATE:
+		invalidate_tree_iterator(&it->tree_iterator);
+		break;
+	default:
+		assert(lookup.operation == NOOP);
+		return 0;
+	}
+
+	/*
+	 * If there is at least one tuple in the tree, it is efficiently equal
+	 * to the empty key.
+	 */
+	if (start_data.key == NULL)
+		equals = memtx_tree_size(tree) != 0;
 
 	/*
 	 * `it->tree_iterator` could potentially be positioned on successor of
@@ -867,23 +949,13 @@ tree_iterator_start(struct iterator *iterator, struct tuple **ret)
 	struct memtx_tree_data<USE_HINT> *res =
 		memtx_tree_iterator_get_elem(tree, &it->tree_iterator);
 	struct tuple *successor = res == NULL ? NULL : res->tuple;
-	if (iterator_type_is_reverse(type)) {
-		/*
-		 * Because of limitations of tree search API we use
-		 * lower_bound for LT search and upper_bound for LE and
-		 * REQ searches. In both cases we find a position to the
-		 * right of the target one. Let's make a step to the
-		 * left to reach target position.
-		 * If we found an invalid iterator all the elements in
-		 * the tree are less (less or equal) to the key, and
-		 * iterator_prev call will convert the iterator to the
-		 * last position in the tree, that's what we need.
-		 */
+	if (lookup.step_back) {
 		memtx_tree_iterator_prev(tree, &it->tree_iterator);
 		res = memtx_tree_iterator_get_elem(tree, &it->tree_iterator);
 	}
+
 	/* If we skip tuple, flag equals is not actual - need to refresh it. */
-	if (skip_equal_tuple && res != NULL &&
+	if (it->after_data.key != NULL && res != NULL &&
 	    (type == ITER_EQ || type == ITER_REQ)) {
 		equals = tuple_compare_with_key(res->tuple, res->hint,
 						it->key_data.key,
@@ -891,6 +963,8 @@ tree_iterator_start(struct iterator *iterator, struct tuple **ret)
 						it->key_data.hint,
 						index->base.def->key_def) == 0;
 	}
+
+	struct txn *txn = in_txn();
 	/*
 	 * Equality iterators requires exact key match: if the result does not
 	 * equal to the key, iteration ends.
@@ -908,7 +982,13 @@ tree_iterator_start(struct iterator *iterator, struct tuple **ret)
 		*ret = memtx_tx_tuple_clarify(txn, space, res->tuple,
 					      index_base, mk_index);
 	}
+
 /********MVCC TRANSACTION MANAGER STORY GARBAGE COLLECTION BOUND START*********/
+	/*
+	 * If the key is full then all parts present, so EQ and REQ iterators
+	 * can return no more than one tuple.
+	 */
+	bool key_is_full = start_data.part_count == cmp_def->part_count;
 	if (key_is_full && !eq_match)
 		memtx_tx_track_point(txn, space, index_base, it->key_data.key);
 	if (!key_is_full ||
@@ -918,6 +998,7 @@ tree_iterator_start(struct iterator *iterator, struct tuple **ret)
 				   start_data.key, start_data.part_count);
 	memtx_tx_story_gc();
 /*********MVCC TRANSACTION MANAGER STORY GARBAGE COLLECTION BOUND END**********/
+
 	return res == NULL || !eq_match || *ret != NULL ? 0 :
 	       iterator->next_internal(iterator, ret);
 }
