@@ -1238,14 +1238,143 @@ memtx_tree_index_random(struct index *base, uint32_t rnd, struct tuple **result)
 	return memtx_prepare_result_tuple(space, result);
 }
 
-template<bool FAST_OFFSET, bool USE_HINT>
+template<bool USE_HINT>
 static ssize_t
-memtx_tree_index_count(struct index *base, enum iterator_type type,
-		       const char *key, uint32_t part_count)
+memtx_tree_index_count_slow(struct index *base, enum iterator_type type,
+			    const char *key, uint32_t part_count)
 {
+	assert(!base->def->opts.fast_offset &&
+	       (base->def->opts.hint == INDEX_HINT_ON) == USE_HINT);
+
 	if (type == ITER_ALL)
-		return memtx_tree_index_size<FAST_OFFSET, USE_HINT>(base);
+		return memtx_tree_index_size<false, USE_HINT>(base);
 	return generic_index_count(base, type, key, part_count);
+}
+
+template<bool USE_HINT>
+static ssize_t
+memtx_tree_index_count_fast(struct index *base, enum iterator_type type,
+			    const char *key, uint32_t part_count)
+{
+	assert(base->def->opts.fast_offset &&
+	       (base->def->opts.hint == INDEX_HINT_ON) == USE_HINT);
+
+	struct region *region = &fiber()->gc;
+	RegionGuard region_guard(region);
+
+	struct memtx_tree_index<true, USE_HINT> *index =
+		(struct memtx_tree_index<true, USE_HINT> *)base;
+	struct key_def *cmp_def = memtx_tree_cmp_def(&index->tree);
+
+	if (memtx_tree_lookup_canonicalize(base, cmp_def, &type,
+					   &key, part_count) == -1)
+		return -1;
+
+	struct memtx_tree_key_data<USE_HINT> start_data;
+	start_data.key = key;
+	start_data.part_count = part_count;
+	if (USE_HINT)
+		start_data.set_hint(key_hint(key, part_count, cmp_def));
+	struct memtx_tree_key_data<USE_HINT> null_after_data = {};
+	struct memtx_tree_lookup_strategy lookup;
+	memtx_tree_lookup_setup(&start_data, null_after_data,
+				&type, cmp_def, region, &lookup);
+
+	struct txn *txn = in_txn();
+	struct space *space = space_by_id(base->def->space_id);
+	memtx_tree_t<true, USE_HINT> *tree = &index->tree;
+	size_t visible_size = memtx_tree_index_size<true, USE_HINT>(base);
+	size_t full_size = memtx_tree_size(tree);
+	memtx_tree_iterator_t<true, USE_HINT> begin;
+	size_t begin_offset;
+	size_t end_offset;
+
+	switch (lookup.operation) {
+	case FIRST:
+	case INVALIDATE:
+		/* For empty key - return the visible tree size. */
+		assert(key == NULL && part_count == 0);
+		/*
+		 * Inform MVCC that we have counted the whole index. Insertion
+		 * or deletion of any tuple in the index will conflict with us.
+		 */
+		memtx_tx_track_count(txn, space, base, ITER_GE, NULL, 0);
+		return visible_size;
+	case LOWER_BOUND:
+		begin = memtx_tree_lower_bound_get_offset(tree, &start_data,
+							  NULL, &begin_offset);
+		break;
+	case UPPER_BOUND:
+		begin = memtx_tree_upper_bound_get_offset(tree, &start_data,
+							  NULL, &begin_offset);
+		break;
+	default:
+		assert(lookup.operation == NOOP);
+		return 0; /* Nothing to be done. */
+	}
+
+	if (lookup.step_back)
+		begin_offset--; /* Unsigned overflow possible. */
+
+	if (begin_offset == size_t(-1)) {
+		assert(iterator_type_is_reverse(type));
+		struct memtx_tree_data<USE_HINT> *data =
+			memtx_tree_iterator_get_elem(&index->tree, &begin);
+		struct tuple *successor = data != NULL ? data->tuple : NULL;
+		/*
+		 * Inform MVCC that we have attempted to read a tuple prior
+		 * to the successor (the first tuple in the tree or NULL if
+		 * the tree is empty) and got nothing by our key and iterator.
+		 * If someone writes a matching tuple at the beginning of the
+		 * tree it will conflict with us.
+		 */
+		memtx_tx_track_gap(txn, space, base, successor, type,
+				   start_data.key, start_data.part_count);
+		return 0; /* No tuples prior to the first one. */
+	}
+
+	if (begin_offset == full_size) {
+		assert(!iterator_type_is_reverse(type));
+		/*
+		 * Inform MVCC that we have attempted to read a tuple right to
+		 * the rightest one in the tree (NULL successor) and thus, got
+		 * nothing. If someone writes a tuple matching our key+iterator
+		 * pair at the end of the tree it will conflict with us. The
+		 * tree can be empty here.
+		 */
+		memtx_tx_track_gap(txn, space, base, NULL, type, start_data.key,
+				   start_data.part_count);
+		return 0; /* No tuples beyond the last one. */
+	}
+
+	/*
+	 * Now, when we have the first tuple and its offset, let's find the
+	 * boundary of the iteration.
+	 */
+	if (type == ITER_EQ) {
+		memtx_tree_upper_bound_get_offset(tree, &start_data,
+						  NULL, &end_offset);
+	} else if (type == ITER_REQ) {
+		memtx_tree_lower_bound_get_offset(tree, &start_data,
+						  NULL, &end_offset);
+		end_offset--; /* Unsigned overflow possible. */
+	} else {
+		end_offset = iterator_type_is_reverse(type) ? -1 : full_size;
+	}
+
+	/*
+	 * Inform MVCC that we have counted tuples in the index by our key and
+	 * iterator. Insertion or deletion of any matching tuple anywhere in the
+	 * index will conflict with us.
+	 */
+	memtx_tx_track_count(txn, space, base, type, start_data.key,
+			     start_data.part_count);
+
+	size_t full_count = (ssize_t(end_offset) - begin_offset) *
+			    iterator_direction(type);
+	size_t invisible_count = memtx_tx_index_invisible_count_matching(
+		txn, space, base, type, start_data.key, start_data.part_count);
+	return full_count - invisible_count;
 }
 
 template<bool FAST_OFFSET, bool USE_HINT>
@@ -2445,7 +2574,9 @@ get_memtx_tree_index_vtab(void)
 		/* .min = */ generic_index_min,
 		/* .max = */ generic_index_max,
 		/* .random = */ memtx_tree_index_random<FAST_OFFSET, USE_HINT>,
-		/* .count = */ memtx_tree_index_count<FAST_OFFSET, USE_HINT>,
+		/* .count = */
+		FAST_OFFSET ? memtx_tree_index_count_fast<USE_HINT> :
+			      memtx_tree_index_count_slow<USE_HINT>,
 		/* .get_internal */
 		memtx_tree_index_get_internal<FAST_OFFSET, USE_HINT>,
 		/* .get = */ memtx_index_get,
