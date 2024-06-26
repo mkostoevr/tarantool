@@ -418,7 +418,7 @@ memtx_hash_index_replace(struct index *base, struct tuple *old_tuple,
 static struct iterator *
 memtx_hash_index_create_iterator(struct index *base, enum iterator_type type,
 				 const char *key, uint32_t part_count,
-				 const char *pos)
+				 const char *pos, uint32_t offset)
 {
 	struct memtx_hash_index *index = (struct memtx_hash_index *)base;
 	struct memtx_engine *memtx = (struct memtx_engine *)base->engine;
@@ -493,7 +493,10 @@ memtx_hash_index_create_iterator(struct index *base, enum iterator_type type,
 	}
 	it->base.next = memtx_iterator_next;
 	it->base.position = generic_iterator_position;
-	return (struct iterator *)it;
+	struct iterator *result = (struct iterator *)it;
+	if (generic_iterator_skip(result, offset) != 0)
+		return NULL;
+	return result;
 }
 
 /** Read view implementation. */

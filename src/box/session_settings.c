@@ -192,7 +192,7 @@ static struct iterator *
 session_settings_index_create_iterator(struct index *base,
 				       enum iterator_type type,
 				       const char *key, uint32_t part_count,
-				       const char *pos)
+				       const char *pos, uint32_t offset)
 {
 	struct session_settings_index *index =
 		(struct session_settings_index *)base;
@@ -236,7 +236,10 @@ session_settings_index_create_iterator(struct index *base,
 		it->base.next = session_settings_iterator_prev;
 		it->setting_id = SESSION_SETTING_COUNT - 1;
 	}
-	return (struct iterator *)it;
+	struct iterator *result = (struct iterator *)it;
+	if (generic_iterator_skip(result, offset) != 0)
+		return NULL;
+	return result;
 }
 
 static int

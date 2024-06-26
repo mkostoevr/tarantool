@@ -3793,7 +3793,7 @@ vinyl_iterator_free(struct iterator *base)
 static struct iterator *
 vinyl_index_create_iterator(struct index *base, enum iterator_type type,
 			    const char *key, uint32_t part_count,
-			    const char *pos)
+			    const char *pos, uint32_t offset)
 {
 	struct vy_lsm *lsm = vy_lsm(base);
 	struct vy_env *env = vy_env(base->engine);
@@ -3863,7 +3863,10 @@ vinyl_index_create_iterator(struct index *base, enum iterator_type type,
 	vy_read_iterator_open_after(
 		&it->iterator, lsm, tx, type, it->key, last,
 		(const struct vy_read_view **)&tx->read_view);
-	return (struct iterator *)it;
+	struct iterator *result = (struct iterator *)it;
+	if (generic_iterator_skip(result, offset) != 0)
+		return NULL;
+	return result;
 err_pos:
 	tuple_unref(it->key.stmt);
 err_key:

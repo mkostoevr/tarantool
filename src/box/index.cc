@@ -548,7 +548,7 @@ box_index_iterator_after(uint32_t space_id, uint32_t index_id, int type,
 	if (txn_begin_ro_stmt(space, &txn, &svp) != 0)
 		return NULL;
 	struct iterator *it = index_create_iterator_after(index, itype, key,
-							  part_count, pos);
+							  part_count, pos, 0);
 	txn_end_ro_stmt(txn, &svp);
 	if (it == NULL)
 		return NULL;
@@ -976,12 +976,13 @@ generic_index_replace(struct index *index, struct tuple *old_tuple,
 struct iterator *
 generic_index_create_iterator(struct index *base, enum iterator_type type,
 			      const char *key, uint32_t part_count,
-			      const char *pos)
+			      const char *pos, uint32_t offset)
 {
 	(void)type;
 	(void)key;
 	(void)part_count;
 	(void)pos;
+	(void)offset;
 	diag_set(UnsupportedIndexFeature, base->def, "read view");
 	return NULL;
 }
@@ -1077,6 +1078,21 @@ exhausted_index_read_view_iterator_next_raw(struct index_read_view_iterator *it,
 {
 	(void)it;
 	*result = read_view_tuple_none();
+	return 0;
+}
+
+int
+generic_iterator_skip(struct iterator *it, uint32_t count)
+{
+	for (size_t i = 0; i < count; i++) {
+		if (box_check_slice() != 0)
+			return -1;
+		struct tuple *skipped_tuple;
+		if (iterator_next(it, &skipped_tuple) != 0)
+			return -1;
+		if (skipped_tuple == NULL)
+			return 0;
+	}
 	return 0;
 }
 

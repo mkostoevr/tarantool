@@ -321,6 +321,8 @@ struct tree_iterator {
 	enum iterator_type type;
 	struct memtx_tree_key_data<USE_HINT> after_data;
 	struct memtx_tree_key_data<USE_HINT> key_data;
+	/** The amount of tuples to skip after the iterator start. */
+	uint32_t offset;
 	/**
 	 * Data that was fetched last, needed to make iterators stable.
 	 * Contains NULL as pointer to tuple only if there was no data fetched.
@@ -838,7 +840,6 @@ memtx_tree_lookup_canonicalize(struct index *base, struct key_def *cmp_def,
 }
 
 enum memtx_tree_lookup_op {
-	NOOP,
 	FIRST,
 	LOWER_BOUND,
 	UPPER_BOUND,
@@ -851,6 +852,8 @@ struct memtx_tree_lookup_strategy {
 	enum memtx_tree_lookup_op operation;
 	/* Requirement to step back to reach the target. */
 	bool step_back;
+	/* The amount of tuples to step over. */
+	uint32_t offset;
 };
 
 /**
@@ -859,13 +862,16 @@ struct memtx_tree_lookup_strategy {
  * - the actual lookup key (updated if required) in @a out_start_data;
  * - the actual iterator type (updated if required) in @a out_type;
  * - the lookup strategy to use in @a out_lookup.
+ *
+ * @retval true if @a out_start_data, @a out_type and @out_lookup are ready;
+ * @retval false if the iteration must be stopped without an error.
  */
 template<bool USE_HINT>
-static void
+static bool
 memtx_tree_lookup_setup(struct memtx_tree_key_data<USE_HINT> *out_start_data,
 			struct memtx_tree_key_data<USE_HINT> after_data,
-			enum iterator_type *out_type, struct key_def *cmp_def,
-			struct region *region,
+			enum iterator_type *out_type, uint32_t offset,
+			struct key_def *cmp_def, struct region *region,
 			struct memtx_tree_lookup_strategy *out_lookup)
 {
 	assert(out_start_data != NULL);
@@ -881,8 +887,7 @@ memtx_tree_lookup_setup(struct memtx_tree_key_data<USE_HINT> *out_start_data,
 	    after_data.key == NULL) {
 		if (!prepare_start_prefix_iterator(&start_data, &type,
 						   cmp_def, region)) {
-			out_lookup->operation = NOOP;
-			return;
+			return false;
 		}
 	}
 
@@ -949,6 +954,144 @@ memtx_tree_lookup_setup(struct memtx_tree_key_data<USE_HINT> *out_start_data,
 	*out_start_data = start_data;
 	out_lookup->operation = op;
 	out_lookup->step_back = need_step_back;
+	out_lookup->offset = offset;
+	return true;
+}
+
+template<bool USE_HINT>
+void
+memtx_tree_lookup_execute_impl(
+	struct memtx_tree_lookup_strategy lookup,
+	struct memtx_tree_key_data<USE_HINT> key_data,
+	const memtx_tree_t<false, USE_HINT> *tree,
+	memtx_tree_iterator_t<false, USE_HINT> *out_it,
+	bool *out_equals, size_t *out_offset)
+{
+	switch (lookup.operation) {
+	case FIRST:
+		*out_it = memtx_tree_first(tree);
+		break;
+	case LOWER_BOUND:
+		*out_it = memtx_tree_lower_bound(tree, &key_data, out_equals);
+		break;
+	case UPPER_BOUND:
+		*out_it = memtx_tree_upper_bound(tree, &key_data, out_equals);
+		break;
+	case INVALIDATE:
+		invalidate_tree_iterator(out_it);
+		break;
+	default:
+		unreachable();
+	}
+	*out_offset = 0;
+}
+
+template<bool USE_HINT>
+void
+memtx_tree_lookup_execute_impl(
+	struct memtx_tree_lookup_strategy lookup,
+	struct memtx_tree_key_data<USE_HINT> key_data,
+	const memtx_tree_t<true, USE_HINT> *tree,
+	memtx_tree_iterator_t<true, USE_HINT> *out_it,
+	bool *out_equals, size_t *out_offset)
+{
+	switch (lookup.operation) {
+	case FIRST:
+		*out_it = memtx_tree_first(tree);
+		*out_offset = 0;
+		break;
+	case LOWER_BOUND:
+		*out_it = memtx_tree_lower_bound_get_offset(
+			tree, &key_data, out_equals, out_offset);
+		break;
+	case UPPER_BOUND:
+		*out_it = memtx_tree_upper_bound_get_offset(
+			tree, &key_data, out_equals, out_offset);
+		break;
+	case INVALIDATE:
+		invalidate_tree_iterator(out_it);
+		*out_offset = memtx_tree_size(tree);
+		break;
+	default:
+		unreachable();
+	}
+}
+
+template<bool USE_HINT>
+static void
+memtx_tree_lookup_execute_offset(const memtx_tree_t<false, USE_HINT> *tree,
+				 memtx_tree_iterator_t<false, USE_HINT> *out_it,
+				 size_t curr_offset, size_t skip, bool reverse)
+{
+	(void)curr_offset;
+	while (skip-- && !memtx_tree_iterator_is_invalid(out_it)) {
+		if (reverse)
+			memtx_tree_iterator_prev(tree, out_it);
+		else
+			memtx_tree_iterator_next(tree, out_it);
+	}
+};
+
+template<bool USE_HINT>
+static void
+memtx_tree_lookup_execute_offset(const memtx_tree_t<true, USE_HINT> *tree,
+				 memtx_tree_iterator_t<true, USE_HINT> *out_it,
+				 size_t curr_offset, size_t skip, bool reverse)
+{
+	/*
+	 * Normalize unsigned overflow to SIZE_MAX if expected. Beware, that
+	 * the curr_offset can be SIZE_MAX already (see the caller's body).
+	 *
+	 * The memtx_tree_iterator_at(SIZE_MAX) gives an invalid iterator.
+	 */
+	if (reverse && skip > curr_offset + 1)
+		skip = curr_offset + 1;
+
+	size_t new_offset = reverse ? curr_offset - skip :
+				      curr_offset + skip;
+	*out_it = memtx_tree_iterator_at(tree, new_offset);
+};
+
+template<bool FAST_OFFSET, bool USE_HINT>
+static void
+memtx_tree_lookup_execute(struct memtx_tree_lookup_strategy lookup,
+			  struct memtx_tree_key_data<USE_HINT> key_data,
+			  const memtx_tree_t<FAST_OFFSET, USE_HINT> *tree,
+			  memtx_tree_iterator_t<FAST_OFFSET, USE_HINT> *out_it,
+			  struct memtx_tree_data<USE_HINT> **out_res,
+			  bool *out_equals, struct tuple **out_successor)
+{
+	assert(tree != NULL);
+	assert(out_it != NULL);
+	assert(out_res != NULL);
+	assert(out_equals != NULL);
+	assert(out_successor != NULL);
+
+	size_t curr_offset;
+	memtx_tree_lookup_execute_impl(lookup, key_data, tree, out_it,
+				       out_equals, &curr_offset);
+
+	/*
+	 * If there is at least one tuple in the tree, it is efficiently equal
+	 * to the empty key.
+	 */
+	if (key_data.key == NULL)
+		*out_equals = memtx_tree_size(tree) != 0;
+
+	/*
+	 * `it->tree_iterator` could potentially be positioned on successor of
+	 * key: we need to track gap based on it.
+	 */
+	*out_res = memtx_tree_iterator_get_elem(tree, out_it);
+	*out_successor = *out_res == NULL ? NULL : (*out_res)->tuple;
+	if (lookup.step_back) {
+		memtx_tree_iterator_prev(tree, out_it);
+		curr_offset--; /* Unsigned overflow possible. */
+	}
+
+	memtx_tree_lookup_execute_offset(tree, out_it, curr_offset,
+					 lookup.offset, lookup.step_back);
+	*out_res = memtx_tree_iterator_get_elem(tree, out_it);
 }
 
 template<bool FAST_OFFSET, bool USE_HINT>
@@ -975,51 +1118,19 @@ tree_iterator_start(struct iterator *iterator, struct tuple **ret)
 		it->after_data.key != NULL ? it->after_data : it->key_data;
 	enum iterator_type type = it->type;
 	struct memtx_tree_lookup_strategy lookup;
-	memtx_tree_lookup_setup(&start_data, it->after_data,
-				&type, cmp_def, region, &lookup);
+	if (!memtx_tree_lookup_setup(&start_data, it->after_data, &type,
+				     it->offset, cmp_def, region, &lookup)) {
+		return 0; /* Nothing to be done. */
+	}
 
 	/* The flag will be changed to true if found tuple equals to the key. */
 	bool equals = false;
+	struct memtx_tree_data<USE_HINT> *res;
+	struct tuple *successor;
 	memtx_tree_t<FAST_OFFSET, USE_HINT> *tree = &index->tree;
 
-	switch (lookup.operation) {
-	case FIRST:
-		it->tree_iterator = memtx_tree_first(tree);
-		break;
-	case LOWER_BOUND:
-		it->tree_iterator = memtx_tree_lower_bound(tree, &start_data,
-							   &equals);
-		break;
-	case UPPER_BOUND:
-		it->tree_iterator = memtx_tree_upper_bound(tree, &start_data,
-							   &equals);
-		break;
-	case INVALIDATE:
-		invalidate_tree_iterator(&it->tree_iterator);
-		break;
-	default:
-		assert(lookup.operation == NOOP);
-		return 0;
-	}
-
-	/*
-	 * If there is at least one tuple in the tree, it is efficiently equal
-	 * to the empty key.
-	 */
-	if (start_data.key == NULL)
-		equals = memtx_tree_size(tree) != 0;
-
-	/*
-	 * `it->tree_iterator` could potentially be positioned on successor of
-	 * key: we need to track gap based on it.
-	 */
-	struct memtx_tree_data<USE_HINT> *res =
-		memtx_tree_iterator_get_elem(tree, &it->tree_iterator);
-	struct tuple *successor = res == NULL ? NULL : res->tuple;
-	if (lookup.step_back) {
-		memtx_tree_iterator_prev(tree, &it->tree_iterator);
-		res = memtx_tree_iterator_get_elem(tree, &it->tree_iterator);
-	}
+	memtx_tree_lookup_execute(lookup, start_data, tree, &it->tree_iterator,
+				  &res, &equals, &successor);
 
 	/* If we skip tuple, flag equals is not actual - need to refresh it. */
 	if (it->after_data.key != NULL && res != NULL &&
@@ -1277,8 +1388,10 @@ memtx_tree_index_count_fast(struct index *base, enum iterator_type type,
 		start_data.set_hint(key_hint(key, part_count, cmp_def));
 	struct memtx_tree_key_data<USE_HINT> null_after_data = {};
 	struct memtx_tree_lookup_strategy lookup;
-	memtx_tree_lookup_setup(&start_data, null_after_data,
-				&type, cmp_def, region, &lookup);
+	if (!memtx_tree_lookup_setup(&start_data, null_after_data, &type,
+				     0, cmp_def, region, &lookup)) {
+		return 0; /* Nothing to be done. */
+	}
 
 	struct txn *txn = in_txn();
 	struct space *space = space_by_id(base->def->space_id);
@@ -1309,8 +1422,8 @@ memtx_tree_index_count_fast(struct index *base, enum iterator_type type,
 							  NULL, &begin_offset);
 		break;
 	default:
-		assert(lookup.operation == NOOP);
-		return 0; /* Nothing to be done. */
+		unreachable();
+		return -1;
 	}
 
 	if (lookup.step_back)
@@ -1975,7 +2088,7 @@ template<bool FAST_OFFSET, bool USE_HINT>
 static struct iterator *
 memtx_tree_index_create_iterator(struct index *base, enum iterator_type type,
 				 const char *key, uint32_t part_count,
-				 const char *pos)
+				 const char *pos, uint32_t offset)
 {
 	struct memtx_tree_index<FAST_OFFSET, USE_HINT> *index =
 		(struct memtx_tree_index<FAST_OFFSET, USE_HINT> *)base;
@@ -2035,6 +2148,7 @@ memtx_tree_index_create_iterator(struct index *base, enum iterator_type type,
 		it->after_data.key = NULL;
 		it->after_data.part_count = 0;
 	}
+	it->offset = offset;
 	return (struct iterator *)it;
 }
 

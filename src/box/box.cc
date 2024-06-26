@@ -3834,7 +3834,8 @@ box_select(uint32_t space_id, uint32_t index_id,
 		return -1;
 
 	struct iterator *it = index_create_iterator_after(index, type, key,
-							  part_count, pos);
+							  part_count, pos,
+							  offset);
 	if (it == NULL) {
 		txn_end_ro_stmt(txn, &svp);
 		return -1;
@@ -3851,10 +3852,6 @@ box_select(uint32_t space_id, uint32_t index_id,
 		rc = iterator_next(it, &tuple);
 		if (rc != 0 || tuple == NULL)
 			break;
-		if (offset > 0) {
-			offset--;
-			continue;
-		}
 		port_c_add_tuple(port, tuple);
 		found++;
 		/*

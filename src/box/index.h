@@ -574,7 +574,8 @@ struct index_vtab {
 					    enum iterator_type type,
 					    const char *key,
 					    uint32_t part_count,
-					    const char *pos);
+					    const char *pos,
+					    uint32_t offset);
 	/** Create an index read view. */
 	struct index_read_view *(*create_read_view)(struct index *index);
 	/** Introspection (index:stat()) */
@@ -921,17 +922,17 @@ index_replace(struct index *index, struct tuple *old_tuple,
 static inline struct iterator *
 index_create_iterator_after(struct index *index, enum iterator_type type,
 			    const char *key, uint32_t part_count,
-			    const char *pos)
+			    const char *pos, uint32_t offset)
 {
 	return index->vtab->create_iterator(index, type, key, part_count,
-					    pos);
+					    pos, offset);
 }
 
 static inline struct iterator *
 index_create_iterator(struct index *index, enum iterator_type type,
 		      const char *key, uint32_t part_count)
 {
-	return index->vtab->create_iterator(index, type, key, part_count, NULL);
+	return index->vtab->create_iterator(index, type, key, part_count, NULL, 0);
 }
 
 static inline struct index_read_view *
@@ -1078,7 +1079,7 @@ int generic_index_reserve(struct index *, uint32_t);
 struct iterator *
 generic_index_create_iterator(struct index *base, enum iterator_type type,
 			      const char *key, uint32_t part_count,
-			      const char *pos);
+			      const char *pos, uint32_t offset);
 int generic_index_build_next(struct index *, struct tuple *);
 void generic_index_end_build(struct index *);
 int
@@ -1092,6 +1093,11 @@ exhausted_iterator_next(struct iterator *it, struct tuple **ret);
 int
 exhausted_index_read_view_iterator_next_raw(struct index_read_view_iterator *it,
 					    struct read_view_tuple *result);
+
+/* Performs regular iteration for @count times. */
+int
+generic_iterator_skip(struct iterator *it, uint32_t count);
+
 /** Unsupported feature error is returned. */
 int
 generic_iterator_position(struct iterator *it, const char **pos,

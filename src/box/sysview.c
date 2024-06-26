@@ -110,7 +110,7 @@ sysview_index_destroy(struct index *index)
 static struct iterator *
 sysview_index_create_iterator(struct index *base, enum iterator_type type,
 			      const char *key, uint32_t part_count,
-			      const char *pos)
+			      const char *pos, uint32_t offset)
 {
 	struct sysview_index *index = (struct sysview_index *)base;
 	struct sysview_engine *sysview = (struct sysview_engine *)base->engine;
@@ -141,7 +141,7 @@ sysview_index_create_iterator(struct index *base, enum iterator_type type,
 	it->base.free = sysview_iterator_free;
 
 	it->source = index_create_iterator_after(pk, type, key, part_count,
-						 pos);
+						 pos, offset);
 	if (it->source == NULL) {
 		mempool_free(&sysview->iterator_pool, it);
 		return NULL;

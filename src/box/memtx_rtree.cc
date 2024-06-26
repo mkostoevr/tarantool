@@ -302,7 +302,7 @@ memtx_rtree_index_reserve(struct index *base, uint32_t size_hint)
 static struct iterator *
 memtx_rtree_index_create_iterator(struct index *base, enum iterator_type type,
 				  const char *key, uint32_t part_count,
-				  const char *pos)
+				  const char *pos, uint32_t offset)
 {
 	struct memtx_rtree_index *index = (struct memtx_rtree_index *)base;
 	struct memtx_engine *memtx = (struct memtx_engine *)base->engine;
@@ -378,7 +378,10 @@ memtx_rtree_index_create_iterator(struct index *base, enum iterator_type type,
 	 * caller's side.
 	 */
 	rtree_search(&index->tree, &rect, op, &it->impl);
-	return (struct iterator *)it;
+	struct iterator *result = (struct iterator *)it;
+	if (generic_iterator_skip(result, offset) != 0)
+		return NULL;
+	return result;
 }
 
 static const struct index_vtab memtx_rtree_index_vtab = {

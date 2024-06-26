@@ -341,7 +341,7 @@ memtx_bitset_index_replace(struct index *base, struct tuple *old_tuple,
 static struct iterator *
 memtx_bitset_index_create_iterator(struct index *base, enum iterator_type type,
 				   const char *key, uint32_t part_count,
-				   const char *pos)
+				   const char *pos, uint32_t offset)
 {
 	struct memtx_bitset_index *index = (struct memtx_bitset_index *)base;
 	struct memtx_engine *memtx = (struct memtx_engine *)base->engine;
@@ -377,6 +377,7 @@ memtx_bitset_index_create_iterator(struct index *base, enum iterator_type type,
 		bitset_key = make_key(key, &bitset_key_size);
 	}
 
+	struct iterator *result;
 	struct tt_bitset_expr expr;
 	tt_bitset_expr_create(&expr, realloc);
 
@@ -421,7 +422,10 @@ memtx_bitset_index_create_iterator(struct index *base, enum iterator_type type,
 	}
 
 	tt_bitset_expr_destroy(&expr);
-	return (struct iterator *)it;
+	result = (struct iterator *)it;
+	if (generic_iterator_skip(result, offset) != 0)
+		return NULL;
+	return result;
 fail:
 	tt_bitset_expr_destroy(&expr);
 	mempool_free(&memtx->iterator_pool, it);
