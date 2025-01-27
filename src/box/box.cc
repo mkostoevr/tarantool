@@ -5152,6 +5152,7 @@ engine_init()
 				    cfg_gets("memtx_allocator"),
 				    cfg_getd("slab_alloc_factor"),
 				    cfg_geti("memtx_sort_threads"),
+				    cfg_getb("memtx_enable_sort_data"),
 				    box_on_indexes_built);
 	engine_register((struct engine *)memtx);
 	assert(memtx->base.id < MAX_TX_ENGINE_COUNT);
