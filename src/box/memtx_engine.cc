@@ -107,16 +107,55 @@ memtx_alloc_init(void)
 	memtx_tuple_new_raw = memtx_tuple_new_raw_impl<ALLOC>;
 }
 
+/*
+ * Usually during final recovery, when .xlog files are loaded and applied,
+ * a special memtx_space_replace_primary_key function is used for faster
+ * recovery. The function only updates primary key while all other indexes
+ * are scheduled to build at the end of recovery.
+ *
+ * This approach doesn't work with MVCC engine and synchro spaces: when
+ * transactions appear in xlog and they may or may not be committed, we
+ * should process them in normal mode throughout all indexes in order to
+ * leave transaction history in each index.
+ *
+ * So all space indexes are built early in this case.
+ */
+static bool
+memtx_build_spaces_early()
+{
+	return memtx_tx_manager_use_mvcc_engine;
+}
+
 static int
 memtx_end_build_primary_key(struct space *space, void *param)
 {
 	struct memtx_space *memtx_space = (struct memtx_space *)space;
 	if (space->engine != param || space_index(space, 0) == NULL ||
-	    memtx_space->replace == memtx_space_replace_all_keys)
+	    memtx_space->replace != memtx_space_replace_build_next)
 		return 0;
 
 	index_end_build(space->index[0]);
 	memtx_space->replace = memtx_space_replace_primary_key;
+	return 0;
+}
+
+/**
+ * Update the replace callbacks of empty memtx
+ * spaces according to the recovery procedure.
+ */
+static int
+memtx_begin_empty_space_final_recovery(struct space *space, void *param)
+{
+	struct memtx_space *memtx_space = (struct memtx_space *)space;
+	if (space->engine != param || space_index(space, 0) == NULL ||
+	    memtx_space->replace != memtx_space_replace_build_next ||
+	    index_size(space->index[0]) != 0)
+		return 0;
+
+	/* Empty MemTX space with fast PK load path planned but not executed. */
+	memtx_space->replace = memtx_build_spaces_early() ?
+			       memtx_space_replace_all_keys :
+			       memtx_space_replace_primary_key;
 	return 0;
 }
 
@@ -252,6 +291,40 @@ memtx_engine_free(struct engine *engine)
 	xdir_destroy(&memtx->snap_dir);
 	tuple_format_unref(memtx->func_key_format);
 	free(memtx);
+}
+
+int
+memtx_space_on_replace(struct space *space)
+{
+	/* Only continue if it's a snapshot recovery. */
+	struct memtx_engine *memtx = (struct memtx_engine *)space->engine;
+	if (memtx->state != MEMTX_INITIAL_RECOVERY)
+		return 0;
+
+	/* Only continue if it's the first insertion into the space. */
+	if (memtx->recovery.last_space_id == space->def->id)
+		return 0;
+
+	/* End building the previously recovered space if any. */
+	if (memtx->recovery.last_space_id != BOX_ID_NIL) {
+		struct space *last_recovered_space =
+			space_by_id(memtx->recovery.last_space_id);
+		VERIFY(memtx_end_build_primary_key(last_recovered_space,
+						   memtx) == 0);
+		if (memtx_build_spaces_early() &&
+		    memtx_build_secondary_keys(last_recovered_space,
+					       memtx) != 0) {
+			return -1;
+		}
+	}
+
+	/* Start building PK of the next space to recover if required. */
+	struct memtx_space *memtx_space = (struct memtx_space *)space;
+	if (memtx_space->replace == memtx_space_replace_build_next)
+		index_begin_build(space->index[0]);
+
+	memtx->recovery.last_space_id = space->def->id;
+	return 0;
 }
 
 /**
@@ -483,9 +556,20 @@ memtx_engine_begin_final_recovery(struct engine *engine)
 	if (memtx->state == MEMTX_OK)
 		return 0;
 
+	/* Build the PK of the last recovered space. */
 	assert(memtx->state == MEMTX_INITIAL_RECOVERY);
-	/* End of the fast path: loaded the primary key. */
-	space_foreach(memtx_end_build_primary_key, memtx);
+	struct space *last_recovered_space =
+		space_by_id(memtx->recovery.last_space_id);
+	VERIFY(memtx_end_build_primary_key(last_recovered_space, memtx) == 0);
+
+	/**
+	 * There may be spaces we had prepared a fast PK build path for, but
+	 * they had no inserts performed during the snapshot recovery, so no
+	 * PK build had been started nor finished for them. Let's just update
+	 * the replace callback for such spaces, so they have the same one as
+	 * all other spaces.
+	 */
+	space_foreach(memtx_begin_empty_space_final_recovery, memtx);
 
 	/* Complete space initialization. */
 	int rc = space_foreach(space_on_initial_recovery_complete, NULL);
@@ -495,19 +579,7 @@ memtx_engine_begin_final_recovery(struct engine *engine)
 		panic("Failed to complete recovery from snapshot!");
 	}
 
-	/*
-	 * Usually during final recovery, when .xlog files are loaded and
-	 * applied, a special memtx_space_replace_primary_key function is
-	 * used for faster recovery. The function only updates primary key
-	 * while all other indexes are scheduled to build at the end of
-	 * recovery.
-	 *
-	 * This approach doesn't work with MVCC engine and synchro spaces:
-	 * When transactions appear in xlog and they may or may not be
-	 * committed, we should process them in normal mode throughout all
-	 * indexes in order to leave transaction history in each index.
-	 */
-	if (!memtx_tx_manager_use_mvcc_engine) {
+	if (!memtx_build_spaces_early()) {
 		/*
 		 * Fast start path: "play out" WAL
 		 * records using the primary key only,
@@ -516,7 +588,9 @@ memtx_engine_begin_final_recovery(struct engine *engine)
 		memtx->state = MEMTX_FINAL_RECOVERY;
 	} else {
 		memtx->state = MEMTX_OK;
-		if (space_foreach(memtx_build_secondary_keys, memtx) != 0)
+		/* Build the secondary keys of the last recovered space. */
+		if (memtx_build_secondary_keys(last_recovered_space,
+					       memtx) != 0)
 			return -1;
 		memtx->on_indexes_built_cb();
 	}
@@ -1816,6 +1890,7 @@ memtx_engine_new(const char *snap_dirname, bool force_recovery,
 		}
 	}
 	memtx->sort_threads = sort_threads;
+	memtx->recovery.last_space_id = BOX_ID_NIL;
 
 	memtx->base.vtab = &memtx_engine_vtab;
 	memtx->base.name = "memtx";

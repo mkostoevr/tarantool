@@ -156,6 +156,9 @@ memtx_space_replace_build_next(struct space *space, struct tuple *old_tuple,
 			       enum dup_replace_mode mode,
 			       struct tuple **result)
 {
+	if (memtx_space_on_replace(space) != 0)
+		return -1;
+
 	assert(old_tuple == NULL);
 	/*
 	 * If before_replace trigger changes tuple, the request is updated
@@ -192,6 +195,9 @@ memtx_space_replace_primary_key(struct space *space, struct tuple *old_tuple,
 				enum dup_replace_mode mode,
 				struct tuple **result)
 {
+	if (memtx_space_on_replace(space) != 0)
+		return -1;
+
 	struct tuple *successor;
 	if (index_replace(space->index[0], old_tuple,
 			  new_tuple, mode, &old_tuple, &successor) != 0)
@@ -293,6 +299,9 @@ memtx_space_replace_all_keys(struct space *space, struct tuple *old_tuple,
 			     enum dup_replace_mode mode,
 			     struct tuple **result)
 {
+	if (memtx_space_on_replace(space) != 0)
+		return -1;
+
 	uint32_t i = 0;
 
 	/* Update the primary key */
@@ -979,7 +988,6 @@ memtx_space_add_primary_key(struct space *space)
 		panic("can't create a new space before snapshot recovery");
 		break;
 	case MEMTX_INITIAL_RECOVERY:
-		index_begin_build(space->index[0]);
 		memtx_space->replace = memtx_space_replace_build_next;
 		break;
 	case MEMTX_FINAL_RECOVERY:

@@ -99,6 +99,13 @@ enum memtx_recovery_state {
  */
 #define MEMTX_ITERATOR_SIZE (184)
 
+/**
+ * End building indexes of a previously recovered space
+ * and begin the current space build (if required).
+ */
+int
+memtx_space_on_replace(struct space *space);
+
 typedef void
 (*memtx_on_indexes_built_cb)(void);
 
@@ -169,6 +176,11 @@ struct memtx_engine {
 	int sort_threads;
 	/** Set of extents allocated using malloc. */
 	struct mh_ptr_t *malloc_extents;
+	/** The fields that are only used on .snap recovery. */
+	struct {
+		/** ID of the space the last insert is performed into. */
+		uint32_t last_space_id;
+	} recovery;
 };
 
 struct memtx_gc_task;
