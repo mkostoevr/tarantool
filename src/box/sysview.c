@@ -596,6 +596,7 @@ static const struct engine_vtab sysview_engine_vtab = {
 	/* .prepare = */ generic_engine_prepare,
 	/* .commit = */ generic_engine_commit,
 	/* .rollback_statement = */ generic_engine_rollback_statement,
+	/* .destroy_savepoint = */ generic_engine_destroy_savepoint,
 	/* .rollback = */ generic_engine_rollback,
 	/* .send_to_read_view = */ generic_engine_send_to_read_view,
 	/* .abort_with_conflict = */ generic_engine_abort_with_conflict,

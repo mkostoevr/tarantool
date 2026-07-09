@@ -4761,6 +4761,7 @@ static const struct engine_vtab vinyl_engine_vtab = {
 	/* .prepare = */ vinyl_engine_prepare,
 	/* .commit = */ vinyl_engine_commit,
 	/* .rollback_statement = */ vinyl_engine_rollback_statement,
+	/* .destroy_savepoint = */ generic_engine_destroy_savepoint,
 	/* .rollback = */ vinyl_engine_rollback,
 	/* .send_to_read_view = */ vinyl_engine_send_to_read_view,
 	/* .abort_with_conflict = */ vinyl_engine_abort_with_conflict,
