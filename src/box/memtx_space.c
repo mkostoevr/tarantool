@@ -346,19 +346,17 @@ memtx_space_prepare_index_tuple(struct tuple_format *format,
  * set, ref tuples and set the savepoint.
  */
 static void
-memtx_set_replace_rollback_info(struct txn_stmt *stmt,
+memtx_set_replace_rollback_info(struct txn_stmt *txn_stmt,
 				struct tuple *old_index_tuple,
 				struct tuple *new_index_tuple,
 				struct region *region)
 {
-	struct memtx_stmt_rollback_info *undo =
-		memtx_stmt_rollback_info_new(region);
+	struct memtx_stmt *stmt = txn_stmt->engine_stmt;
 	if (old_index_tuple != NULL)
-		memtx_stmt_rollback_info_add_old_tuple(undo, old_index_tuple,
-						       region);
+		memtx_stmt_add_old_tuple(stmt, old_index_tuple, region);
 	if (new_index_tuple != NULL)
-		memtx_stmt_rollback_info_set_new_tuple(undo, new_index_tuple);
-	stmt->engine_savepoint = undo;
+		memtx_stmt_set_new_tuple(stmt, new_index_tuple);
+	txn_stmt->engine_stmt = stmt;
 }
 
 /**
@@ -736,8 +734,8 @@ memtx_space_execute_delete_range(struct space *space, struct txn *txn,
 	if (it == NULL)
 		return -1;
 	struct region *region = tx_region_acquire(txn);
-	struct memtx_stmt_rollback_info *undo =
-		memtx_stmt_rollback_info_new(region);
+	struct txn_stmt *txn_stmt = txn_current_stmt(txn);
+	struct memtx_stmt *stmt = (typeof(stmt))txn_stmt->engine_stmt;
 	while (true) {
 		struct tuple *old_index_tuple;
 		if (iterator_next_internal(it, &old_index_tuple) != 0)
@@ -758,8 +756,7 @@ memtx_space_execute_delete_range(struct space *space, struct txn *txn,
 					 &deleted) != 0)
 			goto end;
 		assert(deleted == old_index_tuple);
-		memtx_stmt_rollback_info_add_old_tuple(undo, old_index_tuple,
-						       region);
+		memtx_stmt_add_old_tuple(stmt, old_index_tuple, region);
 		tuple_unref(deleted); /* Unref the "result" as not used. */
 	}
 	iterator_delete(it);
@@ -768,9 +765,6 @@ memtx_space_execute_delete_range(struct space *space, struct txn *txn,
 end:
 	/* Set the rollback info. */
 	tx_region_release(txn, TX_ALLOC_SYSTEM);
-	struct txn_stmt *stmt = txn_current_stmt(txn);
-	if (undo->old_tuples != NULL)
-		stmt->engine_savepoint = undo;
 	return rc;
 }
 
@@ -1315,7 +1309,7 @@ struct memtx_build_stmt_trigger {
 static int
 memtx_build_on_replace_rollback(struct trigger *base, void *event)
 {
-	struct txn_stmt *stmt = (struct txn_stmt *)event;
+	struct txn_stmt *txn_stmt = (struct txn_stmt *)event;
 	struct memtx_build_stmt_trigger *trigger =
 		container_of(base, struct memtx_build_stmt_trigger,
 			     on_rollback);
@@ -1326,19 +1320,18 @@ memtx_build_on_replace_rollback(struct trigger *base, void *event)
 	/*
 	 * Old tuple's format is valid if it exists.
 	 */
-	assert(stmt != NULL);
-	assert(stmt->old_tuple == NULL ||
-	       memtx_tuple_validate(state->format, stmt->old_tuple) == 0);
+	assert(txn_stmt != NULL);
+	assert(txn_stmt->old_tuple == NULL ||
+	       memtx_tuple_validate(state->format, txn_stmt->old_tuple) == 0);
 
 	struct tuple *delete = NULL;
 	struct tuple *successor = NULL;
 
-	struct memtx_stmt_rollback_info *undo =
-		(typeof(undo))stmt->engine_savepoint;
+	struct memtx_stmt *stmt = (typeof(stmt))txn_stmt->engine_stmt;
 	struct tuple *old_tuple;
-	memtx_tuple_list_foreach_or_null(undo->old_tuples, old_tuple, {
-		struct tuple *cmp_tuple = stmt->new_tuple != NULL ?
-					  stmt->new_tuple : old_tuple;
+	memtx_tuple_list_foreach_or_null(stmt->old_tuples, old_tuple, {
+		struct tuple *cmp_tuple = txn_stmt->new_tuple != NULL ?
+					  txn_stmt->new_tuple : old_tuple;
 		/*
 		 * Only rollback the already built part of an index. In case of
 		 * a range delete, this can be more tuples than deleted in the
@@ -1355,7 +1348,7 @@ memtx_build_on_replace_rollback(struct trigger *base, void *event)
 		 * this trigger would not be called.
 		 */
 		state->rc = memtx_index_replace(state->index,
-						stmt->new_tuple, old_tuple,
+						txn_stmt->new_tuple, old_tuple,
 						DUP_REPLACE_OR_INSERT,
 						&delete, &successor);
 		if (state->rc != 0) {
@@ -1369,7 +1362,7 @@ memtx_build_on_replace_rollback(struct trigger *base, void *event)
 	 * why we need to ref new tuple and unref old tuple.
 	 */
 	if (state->index->def->iid == 0) {
-		memtx_tuple_list_foreach(undo->old_tuples, old_tuple, {
+		memtx_tuple_list_foreach(stmt->old_tuples, old_tuple, {
 			tuple_ref(old_tuple);
 		});
 		if (stmt->new_tuple != NULL)
@@ -1399,8 +1392,8 @@ memtx_build_on_replace(struct trigger *trigger, void *event)
 	struct memtx_ddl_state *state = trigger->data;
 	struct txn_stmt *stmt = (struct txn_stmt *)event;
 
-	struct memtx_stmt_rollback_info *undo =
-		(typeof(undo))stmt->engine_savepoint;
+	struct memtx_stmt *undo =
+		(typeof(undo))stmt->engine_stmt;
 	struct tuple *old_tuple;
 	bool replaced_in_built_range = false;
 	memtx_tuple_list_foreach_or_null(undo->old_tuples, old_tuple, {

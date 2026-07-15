@@ -340,9 +340,9 @@ generic_engine_rollback_statement(struct engine *engine, struct txn *txn,
 }
 
 void
-generic_engine_destroy_savepoint(void *engine_savepoint)
+generic_engine_destroy_statement(void *engine_stmt)
 {
-	(void)engine_savepoint;
+	(void)engine_stmt;
 }
 
 void

@@ -311,26 +311,8 @@ struct txn_stmt {
 	const char *min_key;
 	/** The last Arrow inserted key (MP_ARRAY, allocated on txn). */
 	const char *max_key;
-	/**
-	 * If new_tuple != NULL and this transaction was not prepared,
-	 * this member holds added story of the new_tuple.
-	 */
-	struct memtx_story *add_story;
-	/**
-	 * If new_tuple == NULL and this transaction was not prepared,
-	 * this member holds added story of the old_tuple.
-	 *
-	 * If the statement is IPROTO_DELETE_RANGE, it holds all deleted
-	 * tuple stories (next != NULL if deleted more than one).
-	 *
-	 * Only one prepared TX can delete a tuple and a story. But when
-	 * there are several in-progress transactions and they delete the
-	 * same tuple we have to remember several delete statements for
-	 * one story. This is done in this list.
-	 */
-	struct memtx_del_story_link *del_stories;
-	/** Engine savepoint for the start of this statement. */
-	void *engine_savepoint;
+	/** Engine-specific statement data, also used as a savepoint. */
+	void *engine_stmt;
 	/** Redo info: the binary log row */
 	struct xrow_header *row;
 	/** on_commit and/or on_rollback list is not empty. */

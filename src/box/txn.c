@@ -305,9 +305,7 @@ txn_stmt_new(struct txn *txn, uint16_t type)
 	stmt->new_tuple = NULL;
 	stmt->min_key = NULL;
 	stmt->max_key = NULL;
-	stmt->add_story = NULL;
-	stmt->del_stories = NULL;
-	stmt->engine_savepoint = NULL;
+	stmt->engine_stmt = NULL;
 	stmt->row = NULL;
 	stmt->has_triggers = false;
 	stmt->is_own_delete = false;
@@ -318,16 +316,14 @@ txn_stmt_new(struct txn *txn, uint16_t type)
 static inline void
 txn_stmt_destroy(struct txn_stmt *stmt)
 {
-	assert(stmt->add_story == NULL && stmt->del_stories == NULL);
-
 	if (stmt->has_triggers)
 		trigger_destroy(&stmt->on_rollback);
 	if (stmt->old_tuple != NULL)
 		tuple_unref(stmt->old_tuple);
 	if (stmt->new_tuple != NULL)
 		tuple_unref(stmt->new_tuple);
-	if (stmt->engine_savepoint != NULL)
-		engine_destroy_savepoint(stmt->engine, stmt->engine_savepoint);
+	if (stmt->engine_stmt != NULL)
+		engine_destroy_statement(stmt->engine, stmt->engine_stmt);
 }
 
 void

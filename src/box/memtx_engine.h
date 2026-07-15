@@ -225,67 +225,82 @@ struct memtx_tuple_list {
 	memtx_tuple_list_foreach_impl(true, list_, tuple_, code_)
 
 /**
- * Structure which contains pointers to the tuples,
- * that are used in rollback.
+ * MemTX-specific statement data. Contains pointers to the tuples, that
+ * are used in rollback and data used by the MemTX transaction manager.
  */
-struct memtx_stmt_rollback_info {
+struct memtx_stmt {
 	/* A list of deleted tuples (NULL if no tuple deleted).*/
 	struct memtx_tuple_list *old_tuples;
 	/* The inserted tuple (NULL if no tuple inserted). */
 	struct tuple *new_tuple;
+	/**
+	 * If new_tuple != NULL and this transaction was not prepared,
+	 * this member holds added story of the new_tuple.
+	 */
+	struct memtx_story *add_story;
+	/**
+	 * If new_tuple == NULL and this transaction was not prepared,
+	 * this member holds added story of the old_tuple.
+	 *
+	 * If the statement is IPROTO_DELETE_RANGE, it holds all deleted
+	 * tuple stories (next != NULL if deleted more than one).
+	 *
+	 * Only one prepared TX can delete a tuple and a story. But when
+	 * there are several in-progress transactions and they delete the
+	 * same tuple we have to remember several delete statements for
+	 * one story. This is done in this list.
+	 */
+	struct memtx_del_story_link *del_stories;
 };
 
 /**
- * Allocate and zero-initialize a rollback info on the region.
+ * Allocate and zero-initialize MemTX-specific statement data on the region.
  */
-static inline struct memtx_stmt_rollback_info *
-memtx_stmt_rollback_info_new(struct region *region)
+static inline struct memtx_stmt *
+memtx_stmt_new(struct region *region)
 {
-	struct memtx_stmt_rollback_info *undo =
-		xregion_alloc_object(region, typeof(*undo));
-	memset(undo, 0, sizeof(*undo));
-	return undo;
+	struct memtx_stmt *stmt = xregion_alloc_object(region, typeof(*stmt));
+	memset(stmt, 0, sizeof(*stmt));
+	return stmt;
 }
 
 /**
- * Unref the tuples referenced by the rollback info.
+ * Unref the tuples referenced by the MemTX-specific statement data.
  */
 static inline void
-memtx_stmt_rollback_info_delete(struct memtx_stmt_rollback_info *undo)
+memtx_stmt_delete(struct memtx_stmt *stmt)
 {
 	struct tuple *old_tuple;
-	memtx_tuple_list_foreach(undo->old_tuples, old_tuple, {
+	memtx_tuple_list_foreach(stmt->old_tuples, old_tuple, {
 		tuple_unref(old_tuple);
 	});
-	if (undo->new_tuple != NULL)
-		tuple_unref(undo->new_tuple);
+	if (stmt->new_tuple != NULL)
+		tuple_unref(stmt->new_tuple);
 }
 
 /**
- * Add a deleted tuple to the rollback info.
+ * Add a deleted tuple to the MemTX-specific statement data.
  */
 static inline void
-memtx_stmt_rollback_info_add_old_tuple(struct memtx_stmt_rollback_info *undo,
-				       struct tuple *old_tuple,
-				       struct region *region)
+memtx_stmt_add_old_tuple(struct memtx_stmt *stmt, struct tuple *old_tuple,
+			 struct region *region)
 {
-	struct memtx_tuple_list *prev_deleted = undo->old_tuples;
-	undo->old_tuples =
+	struct memtx_tuple_list *prev_deleted = stmt->old_tuples;
+	stmt->old_tuples =
 		xregion_alloc_object(region, struct memtx_tuple_list);
-	undo->old_tuples->tuple = old_tuple;
-	undo->old_tuples->next = prev_deleted;
+	stmt->old_tuples->tuple = old_tuple;
+	stmt->old_tuples->next = prev_deleted;
 	tuple_ref(old_tuple);
 }
 
 /**
- * Set the new tuple in the rollback info.
+ * Set the new tuple in the MemTX-specific statement data.
  */
 static inline void
-memtx_stmt_rollback_info_set_new_tuple(struct memtx_stmt_rollback_info *undo,
-				       struct tuple *new_tuple)
+memtx_stmt_set_new_tuple(struct memtx_stmt *stmt, struct tuple *new_tuple)
 {
-	assert(undo->new_tuple == NULL);
-	undo->new_tuple = new_tuple;
+	assert(stmt->new_tuple == NULL);
+	stmt->new_tuple = new_tuple;
 	tuple_ref(new_tuple);
 }
 

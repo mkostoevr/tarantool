@@ -2627,7 +2627,7 @@ vinyl_engine_begin_statement(struct engine *engine, struct txn *txn)
 	struct vy_tx *tx = txn->engines_tx[engine->id];
 	struct txn_stmt *stmt = txn_current_stmt(txn);
 	assert(tx != NULL);
-	return vy_tx_begin_statement(tx, &stmt->engine_savepoint);
+	return vy_tx_begin_statement(tx, &stmt->engine_stmt);
 }
 
 static void
@@ -2636,7 +2636,7 @@ vinyl_engine_rollback_statement(struct engine *engine, struct txn *txn,
 {
 	struct vy_tx *tx = txn->engines_tx[engine->id];
 	assert(tx != NULL);
-	vy_tx_rollback_statement(tx, stmt->engine_savepoint);
+	vy_tx_rollback_statement(tx, stmt->engine_stmt);
 }
 
 static void
@@ -4761,7 +4761,7 @@ static const struct engine_vtab vinyl_engine_vtab = {
 	/* .prepare = */ vinyl_engine_prepare,
 	/* .commit = */ vinyl_engine_commit,
 	/* .rollback_statement = */ vinyl_engine_rollback_statement,
-	/* .destroy_savepoint = */ generic_engine_destroy_savepoint,
+	/* .destroy_statement = */ generic_engine_destroy_statement,
 	/* .rollback = */ vinyl_engine_rollback,
 	/* .send_to_read_view = */ vinyl_engine_send_to_read_view,
 	/* .abort_with_conflict = */ vinyl_engine_abort_with_conflict,

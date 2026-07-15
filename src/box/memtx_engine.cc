@@ -810,6 +810,20 @@ memtx_engine_begin(struct engine *engine, struct txn *txn)
 		txn_can_yield(txn, false);
 }
 
+/**
+ * Begin statement in the MemTX engine: allocate the MemTX-specific data.
+ */
+static int
+memtx_engine_begin_statement(struct engine *engine, struct txn *txn)
+{
+	(void)engine;
+	struct txn_stmt *stmt = txn_current_stmt(txn);
+	struct region *region = tx_region_acquire(txn);
+	stmt->engine_stmt = memtx_stmt_new(region);
+	tx_region_release(txn, TX_ALLOC_SYSTEM);
+	return 0;
+}
+
 static int
 memtx_engine_prepare(struct engine *engine, struct txn *txn)
 {
@@ -828,20 +842,19 @@ memtx_engine_prepare(struct engine *engine, struct txn *txn)
 static void
 memtx_engine_commit(struct engine *engine, struct txn *txn)
 {
-	struct txn_stmt *stmt;
-	stailq_foreach_entry(stmt, &txn->stmts, next) {
-		if (stmt->engine != engine)
+	struct txn_stmt *txn_stmt;
+	stailq_foreach_entry(txn_stmt, &txn->stmts, next) {
+		if (txn_stmt->engine != engine)
 			continue;
 		if (memtx_tx_manager_use_mvcc_engine) {
-			assert(stmt->space->engine == engine);
-			memtx_tx_history_commit_stmt(stmt);
+			assert(txn_stmt->space->engine == engine);
+			memtx_tx_history_commit_stmt(txn_stmt);
 		}
-		struct memtx_stmt_rollback_info *undo =
-			(typeof(undo))stmt->engine_savepoint;
-		if (undo != NULL) {
-			struct space *space = stmt->space;
+		struct memtx_stmt *stmt = (typeof(stmt))txn_stmt->engine_stmt;
+		if (stmt != NULL) {
+			struct space *space = txn_stmt->space;
 			struct tuple *old_tuple;
-			memtx_tuple_list_foreach(undo->old_tuples, old_tuple, {
+			memtx_tuple_list_foreach(stmt->old_tuples, old_tuple, {
 				if (space->upgrade != NULL)
 					memtx_space_upgrade_untrack_tuple(
 						space->upgrade, old_tuple);
@@ -852,19 +865,19 @@ memtx_engine_commit(struct engine *engine, struct txn *txn)
 
 static void
 memtx_engine_rollback_statement(struct engine *engine, struct txn *txn,
-				struct txn_stmt *stmt)
+				struct txn_stmt *txn_stmt)
 {
 	(void)engine;
 	(void)txn;
-	/* Only roll back the changes if they were made. */
-	if (stmt->engine_savepoint == NULL)
+	/* Skip if deleted the savepoint manually (in the memtx_tx.c). */
+	if (txn_stmt->engine_stmt == NULL)
 		return;
-	struct memtx_stmt_rollback_info *undo =
-		(typeof(undo))stmt->engine_savepoint;
-	struct memtx_tuple_list *old_tuples = undo->old_tuples;
-	struct tuple *new_tuple = undo->new_tuple;
-	/* The savepoint is only set if anything has changed. */
-	assert(old_tuples != NULL || new_tuple != NULL);
+	struct memtx_stmt *stmt = (typeof(stmt))txn_stmt->engine_stmt;
+	struct memtx_tuple_list *old_tuples = stmt->old_tuples;
+	struct tuple *new_tuple = stmt->new_tuple;
+	/* Only roll back the changes if they were made. */
+	if (old_tuples == NULL && new_tuple == NULL)
+		return;
 	/*
 	 * Can only have more than one old tuple if no inserts were made
 	 * (that is, the op is delete_range, that only sets old_tuples).
@@ -872,7 +885,7 @@ memtx_engine_rollback_statement(struct engine *engine, struct txn *txn,
 	 */
 	assert(old_tuples == NULL || old_tuples->next == NULL ||
 	       new_tuple == NULL);
-	struct space *space = stmt->space;
+	struct space *space = txn_stmt->space;
 	if (space == NULL) {
 		/* The space was deleted. Nothing to rollback. */
 		return;
@@ -889,7 +902,7 @@ memtx_engine_rollback_statement(struct engine *engine, struct txn *txn,
 	 * in the `old_tuples` list, if any, as visible again.
 	 */
 	if (memtx_tx_manager_use_mvcc_engine)
-		return memtx_tx_history_rollback_stmt(stmt);
+		return memtx_tx_history_rollback_stmt(txn_stmt);
 
 	if (memtx_space->replace == memtx_space_replace_all_keys)
 		index_count = space->index_count;
@@ -925,13 +938,14 @@ memtx_engine_rollback_statement(struct engine *engine, struct txn *txn,
 }
 
 /**
- * Free the rollback info, if any, allocated during a statement execution.
+ * Free the MemTX-specific statement data.
  */
 static void
-memtx_engine_destroy_savepoint(void *engine_savepoint)
+memtx_engine_destroy_statement(void *engine_stmt)
 {
-	struct memtx_stmt_rollback_info *undo = (typeof(undo))engine_savepoint;
-	memtx_stmt_rollback_info_delete(undo);
+	struct memtx_stmt *stmt = (typeof(stmt))engine_stmt;
+	assert(stmt->add_story == NULL && stmt->del_stories == NULL);
+	memtx_stmt_delete(stmt);
 }
 
 static void
@@ -1852,11 +1866,11 @@ static const struct engine_vtab memtx_engine_vtab = {
 	/* .join = */ memtx_engine_join,
 	/* .complete_join = */ memtx_engine_complete_join,
 	/* .begin = */ memtx_engine_begin,
-	/* .begin_statement = */ generic_engine_begin_statement,
+	/* .begin_statement = */ memtx_engine_begin_statement,
 	/* .prepare = */ memtx_engine_prepare,
 	/* .commit = */ memtx_engine_commit,
 	/* .rollback_statement = */ memtx_engine_rollback_statement,
-	/* .destroy_savepoint = */ memtx_engine_destroy_savepoint,
+	/* .destroy_statement = */ memtx_engine_destroy_statement,
 	/* .rollback = */ generic_engine_rollback,
 	/* .send_to_read_view = */ memtx_engine_send_to_read_view,
 	/* .abort_with_conflict = */ memtx_engine_abort_with_conflict,

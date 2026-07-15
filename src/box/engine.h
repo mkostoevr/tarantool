@@ -191,9 +191,9 @@ struct engine_vtab {
 	void (*rollback_statement)(struct engine *, struct txn *,
 				   struct txn_stmt *);
 	/*
-	 * Called to free the stmt->engine_savepoint if required.
+	 * Called to free the engine-specific statement data if required.
 	 */
-	void (*destroy_savepoint)(void *engine_savepoint);
+	void (*destroy_statement)(void *engine_stmt);
 	/*
 	 * Roll back and end the transaction in the engine.
 	 */
@@ -442,9 +442,9 @@ engine_rollback_statement(struct engine *engine, struct txn *txn,
 }
 
 static inline void
-engine_destroy_savepoint(struct engine *engine, struct txn_stmt *stmt)
+engine_destroy_statement(struct engine *engine, struct txn_stmt *stmt)
 {
-	engine->vtab->destroy_savepoint(stmt);
+	engine->vtab->destroy_statement(stmt);
 }
 
 static inline void
@@ -571,7 +571,7 @@ int generic_engine_prepare(struct engine *, struct txn *);
 void generic_engine_commit(struct engine *, struct txn *);
 void generic_engine_rollback_statement(struct engine *, struct txn *,
 				       struct txn_stmt *);
-void generic_engine_destroy_savepoint(void *);
+void generic_engine_destroy_statement(void *);
 void generic_engine_rollback(struct engine *, struct txn *);
 void generic_engine_send_to_read_view(struct engine *, struct txn *, int64_t);
 void generic_engine_abort_with_conflict(struct engine *, struct txn *);
